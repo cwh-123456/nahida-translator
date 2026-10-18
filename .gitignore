@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 大体积本地资源（不随仓库分发，用 launchers/setup.bat 下载）
+models/
+runtime/
+
+# 本地素材：纳西妲动图版权归米哈游/原作者，仅本地个人使用，不随仓库分发
+assets/*
+!assets/README.md
+
+# 运行产物 / 个人配置
+logs/
+*.log
+*.pid
+config/config.json
+
+# 系统与编辑器
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/
+
+# 临时文件
+tmp*
+browser-screenshots/
