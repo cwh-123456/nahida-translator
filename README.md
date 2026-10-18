@@ -10,6 +10,8 @@ Qwen2.5-7B-Instruct，引擎是 llama.cpp，不联网、不付费、不需要登
 界面是纳西妲（草神）风格的暗绿主题：深林绿底、草绿高亮、奶白文字，标题带有叶脉纹理和金色微光，
 全部由程序用 PIL 现场绘制，不含任何游戏素材。
 
+> 为什么做这个项目 → [MOTIVATION.md](MOTIVATION.md)
+
 ![界面预览](docs/preview.png)
 
 ---
