@@ -165,3 +165,12 @@ nahida-translator/
 - 若你自行放入同人图 / 游戏截图作为背景（`assets\nahida_swing.gif`），请仅本地个人使用，
   版权归原作者 / 米哈游所有，不要二次分发。
 - 所有翻译在本机完成，不上传任何文本。
+
+## 许可
+
+本项目源码以 [MIT License](LICENSE) 发布，可自由使用、修改、分发，包括商业用途，保留版权声明即可。
+
+请注意 MIT 只覆盖本仓库的代码。运行时依赖各有各的许可：Qwen2.5 模型遵循
+[Apache-2.0](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF)，
+llama.cpp 遵循 [MIT](https://github.com/ggml-org/llama.cpp/blob/master/LICENSE)，
+自行放入 `assets\` 的图片素材版权归原作者 / 米哈游所有、不随本项目授权。
