@@ -32,9 +32,9 @@ Qwen2.5-7B-Instruct，引擎是 llama.cpp，不联网、不付费、不需要登
 |---|---|
 | ![模式选择](docs/preview_mode.png) | ![单词详解](docs/preview_word.png) |
 
-| 常驻按钮 | 动态背景 |
+| 常驻按钮 | 译文面板 |
 |---|---|
-| ![常驻按钮](docs/preview_dock.png) | ![动态背景](docs/preview_panel_bg.png) |
+| ![常驻按钮](docs/preview_dock.png) | ![译文面板](docs/preview_panel_bg.png) |
 
 ## 环境要求
 
@@ -161,10 +161,15 @@ nahida-translator/
 
 ## 版权与隐私
 
-- 代码为本项目原创。界面主题为程序绘制的配色，不包含《原神》游戏素材。
-- 若你自行放入同人图 / 游戏截图作为背景（`assets\nahida_swing.gif`），请仅本地个人使用，
-  版权归原作者 / 米哈游所有，不要二次分发。
+- 代码为本项目原创，界面配色与全部 UI 元素均由程序绘制。仓库内**不含任何游戏素材、立绘或同人图**，
+  README 中的截图也是在不加载背景图的情况下渲染的。
+- 主题配色致敬《原神》角色纳西妲，但未使用其官方立绘、模型或宣传素材。相关角色与 IP 版权归
+  米哈游（miHoYo）所有，本项目与官方无任何关联。
+- 若你自行放入同人图 / 游戏截图作为背景（`assets\nahida_swing.gif`），该图片不随本项目授权，
+  请仅本地个人使用，不要二次分发；版权归原作者 / 米哈游所有。
 - 所有翻译在本机完成，不上传任何文本。
+
+> © All rights reserved by miHoYo. Other properties belong to their respective owners.
 
 ## 许可
 
