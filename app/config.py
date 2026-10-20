@@ -3,7 +3,14 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
+import shutil
+import tempfile
+import threading
+import time
+
+log = logging.getLogger("config")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = os.path.join(ROOT, "config")
@@ -77,6 +84,115 @@ def _merge(base: dict, override: dict) -> dict:
     return out
 
 
+# ---------------------------------------------------------------- 内部工具
+# 所有写盘都从这里走：同一把锁串行化，先写临时文件再原子替换，
+# 避免托盘线程 / Tk 线程同时写导致内容交错，或写到一半崩溃留下半个 JSON。
+_SAVE_LOCK = threading.RLock()
+_MISSING = object()
+
+
+def _get_path(data: dict, path: str):
+    """按 "ui.mascot_enabled" 这样的路径取值，不存在返回 _MISSING。"""
+    cur = data
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return _MISSING
+        cur = cur[part]
+    return cur
+
+
+def _set_path(data: dict, path: str, value) -> None:
+    """按点号路径写入，缺失的中间层自动补空字典。"""
+    parts = path.split(".")
+    cur = data
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[part] = nxt
+        cur = nxt
+    cur[parts[-1]] = copy.deepcopy(value)
+
+
+def _sanitize(data: dict) -> dict:
+    """按 DEFAULTS 的白名单过滤，避免把程序内部的临时键或错误类型写进文件。"""
+    out: dict = {}
+    dropped: list[str] = []
+    for key, value in (data or {}).items():
+        default = DEFAULTS.get(key, _MISSING)
+        if default is _MISSING:
+            dropped.append(key)
+            continue
+        if isinstance(default, dict):
+            if not isinstance(value, dict):
+                dropped.append(key)
+                continue
+            sub: dict = {}
+            for sub_key, sub_value in value.items():
+                if sub_key in default:
+                    sub[sub_key] = sub_value
+                else:
+                    dropped.append(f"{key}.{sub_key}")
+            out[key] = sub
+        elif isinstance(value, dict):
+            # 默认值是标量却收到字典，写进去会让下次加载出错
+            dropped.append(key)
+        else:
+            out[key] = value
+    if dropped:
+        log.warning("保存配置时丢弃了不认识的字段: %s", ", ".join(sorted(dropped)))
+    return out
+
+
+def _read_raw() -> dict:
+    """读磁盘上的原始配置（不合并默认值）。文件缺失或损坏时回退到默认值副本。"""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        log.error("配置文件顶层不是 JSON 对象，将按默认值处理")
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        log.error("读取配置文件失败，将按默认值处理: %s", exc)
+    return copy.deepcopy(DEFAULTS)
+
+
+def _atomic_write(path: str, text: str) -> None:
+    """同目录临时文件 + fsync + os.replace，保证文件要么是旧内容要么是新内容。"""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".config-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _backup_broken_config() -> str | None:
+    """把无法解析的配置文件另存一份，避免用户配置被无声丢弃。"""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dst = f"{CONFIG_PATH}.bad-{stamp}"
+    seq = 1
+    while os.path.exists(dst):
+        seq += 1
+        dst = f"{CONFIG_PATH}.bad-{stamp}-{seq}"
+    try:
+        shutil.copy2(CONFIG_PATH, dst)
+        return dst
+    except Exception:
+        return None
+
+
 def load_config() -> dict:
     data = {}
     # 迁移旧版本放在根目录的 config.json
@@ -84,7 +200,8 @@ def load_config() -> dict:
         try:
             with open(LEGACY_CONFIG_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except Exception:
+        except Exception as exc:
+            log.error("旧版配置文件解析失败: %s", exc)
             data = {}
         try:
             os.remove(LEGACY_CONFIG_PATH)
@@ -93,19 +210,51 @@ def load_config() -> dict:
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
+                loaded = json.load(f)
+            if not isinstance(loaded, dict):
+                raise ValueError("顶层不是 JSON 对象")
+            data = loaded
+        except Exception as exc:
             data = {}
+            backup = _backup_broken_config()
+            log.error(
+                "配置文件无法解析（%s），已备份到 %s，本次使用默认设置",
+                exc, backup or "（备份失败）",
+            )
     cfg = _merge(DEFAULTS, data)
     if not os.path.exists(CONFIG_PATH):
         save_config(cfg)
     return cfg
 
 
-def save_config(cfg: dict) -> None:
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+def save_config(cfg: dict, keys=None) -> bool:
+    """保存配置。
+
+    keys=None            —— 整份写回（兼容旧调用）。
+    keys=["ui.mascot_enabled", ...] —— 只把这几项合并进磁盘现值，其余字段保持磁盘原样。
+
+    之所以要有 keys 参数：进程内存里的 cfg 可能被临时改过（测试脚本、实验性功能、
+    异常回滚等），整份写回会把这些临时值一起固化到文件里。指定 keys 后，
+    只有用户真正操作的那几个字段会落盘。
+    """
+    with _SAVE_LOCK:
+        try:
+            if keys is None:
+                data = copy.deepcopy(cfg)
+            else:
+                data = _read_raw()
+                for key in keys:
+                    value = _get_path(cfg, key)
+                    if value is _MISSING:
+                        log.warning("保存配置时找不到字段 %s，已跳过", key)
+                        continue
+                    _set_path(data, key, value)
+            text = json.dumps(_sanitize(data), ensure_ascii=False, indent=2)
+            _atomic_write(CONFIG_PATH, text)
+            return True
+        except Exception as exc:
+            log.error("保存配置失败（磁盘写入异常）: %s", exc)
+            return False
 
 
 def abspath(rel: str) -> str:

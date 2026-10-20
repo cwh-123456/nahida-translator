@@ -4,7 +4,10 @@
 """
 from __future__ import annotations
 
+import logging
 import tkinter as tk
+
+log = logging.getLogger("ui")
 
 # 纳西妲主题
 BG = "#101f18"          # 深林绿（面板底色）
@@ -1047,11 +1050,25 @@ class PanelBackground:
 
     def hide(self) -> None:
         self._cancel()
-        if self.win is not None:
-            try:
-                self.win.withdraw()
-            except tk.TclError:
-                pass
+        if self.win is None:
+            return
+        try:
+            self.win.withdraw()
+        except tk.TclError:
+            pass
+        # 半透明 + 圆角 region 的 overrideredirect 窗口，偶尔 Tk 侧已经算作隐藏、
+        # 但 HWND 还留在屏幕上（表现就是"面板关了，只剩一块背景动图"）。
+        # 这里额外用系统调用确认一次，不依赖 Tk 的内部状态。
+        try:
+            import ctypes
+
+            u32 = ctypes.windll.user32
+            hwnd = u32.GetAncestor(self.win.winfo_id(), 2)
+            if hwnd and u32.IsWindowVisible(hwnd):
+                u32.ShowWindow(hwnd, 0)  # SW_HIDE
+                log.warning("背景层窗口未随面板隐藏，已用系统调用强制隐藏")
+        except Exception:
+            pass
 
     def destroy(self) -> None:
         self._cancel()
@@ -1285,6 +1302,9 @@ class ResultWindow:
 
     def _sync_bg(self) -> None:
         """把背景层对齐到面板几何；带防重入 + 去重，避免 Configure 死循环。"""
+        # 面板已关闭时不要再去动背景层，否则等于在隐藏之后又去改它的几何和 region
+        if not self._shown:
+            return
         if self.bg is None or self.win is None or self._syncing_bg:
             return
         self._syncing_bg = True
@@ -1591,6 +1611,10 @@ class ResultWindow:
 
     def _fit(self) -> None:
         self._fit_job = None
+        # 面板已经关了就别再算高度：关闭时 _fit 可能还排在队列里，
+        # 它会重新写几何 + 重设圆角，正是"关了又冒出半块东西"的来源
+        if not self._shown:
+            return
         if self.win is None or self.text is None:
             return
         try:
@@ -1756,13 +1780,24 @@ class ResultWindow:
 
     def close(self) -> None:
         self._shown = False
-        if self.bg is not None:
-            self.bg.hide()
+        # 取消挂起的重排/重绘：面板关了就不该再有任何回调去动窗口，
+        # 否则 _fit() 会在关闭之后再写一次几何和圆角区域，把图层搅乱
+        for attr in ("_fit_job", "_header_job"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        # 先收面板、再收背景：万一中途出岔子，也不会只剩一块背景图飘在桌面上
         if self.win is not None:
             try:
                 self.win.withdraw()
             except tk.TclError:
-                self.win = None
+                pass
+        if self.bg is not None:
+            self.bg.hide()
         if self.on_close:
             try:
                 self.on_close()

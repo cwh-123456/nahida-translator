@@ -276,7 +276,7 @@ class TranslatorApp:
         except Exception:
             pass
         try:
-            config.save_config(self.cfg)
+            config.save_config(self.cfg, ["mode"])
         except Exception:
             pass
         try:
@@ -313,7 +313,9 @@ class TranslatorApp:
             ui["window_pos"] = [int(x), int(y)]
             ui["popup_width"] = int(self.result.width)
             ui["popup_height"] = int(self.result.min_h)
-            config.save_config(self.cfg)
+            config.save_config(
+                self.cfg, ["ui.window_pos", "ui.popup_width", "ui.popup_height"]
+            )
         except Exception:
             pass
 
@@ -335,11 +337,13 @@ class TranslatorApp:
     def _toggle_mascot(self, show: bool | None = None) -> None:
         if self.mascot is None:
             return
-        enabled = (not self._mascot_var.get()) if show is None else bool(show)
+        # 菜单项是 add_checkbutton + variable，点击时 Tk 会把变量翻成新状态再执行 command，
+        # 所以这里要直接采用变量的当前值，不能再取反（取反会导致永远关不掉/开不起来）。
+        enabled = bool(self._mascot_var.get()) if show is None else bool(show)
         self._mascot_var.set(enabled)
         self.cfg["ui"]["mascot_enabled"] = enabled
         try:
-            config.save_config(self.cfg)
+            config.save_config(self.cfg, ["ui.mascot_enabled"])
         except Exception:
             pass
         if enabled:
@@ -371,7 +375,7 @@ class TranslatorApp:
         enabled = not bool(self.cfg["ui"].get("panel_click_through", False))
         self.cfg["ui"]["panel_click_through"] = enabled
         try:
-            config.save_config(self.cfg)
+            config.save_config(self.cfg, ["ui.panel_click_through"])
         except Exception:
             pass
         self.result.apply_click_through(enabled)
@@ -381,7 +385,7 @@ class TranslatorApp:
         enabled = bool(self._auto_pt_var.get())
         self.cfg["ui"]["panel_auto_passthrough"] = enabled
         try:
-            config.save_config(self.cfg)
+            config.save_config(self.cfg, ["ui.panel_auto_passthrough"])
         except Exception:
             pass
         log.info("面板闲置自动穿透: %s", enabled)
@@ -650,7 +654,7 @@ class TranslatorApp:
         self.paused = not self.paused
         self.watcher.enabled = not self.paused
         self.cfg["pause"] = self.paused
-        config.save_config(self.cfg)
+        config.save_config(self.cfg, ["pause"])
         log.info("划词监听: %s", "暂停" if self.paused else "开启")
 
     def _toggle_autostart(self) -> None:
@@ -660,7 +664,7 @@ class TranslatorApp:
             log.info("开机自启: %s", self.cfg["autostart"])
         except Exception as exc:
             log.error("设置开机自启失败: %s", exc)
-        config.save_config(self.cfg)
+        config.save_config(self.cfg, ["autostart"])
 
     def _restart_engine(self) -> None:
         self._tray_title("英译中助手 · 重启引擎中")
