@@ -1,9 +1,11 @@
 @echo off
-rem First-time setup: install Python packages, then download engine + model (~5GB, resumable)
+rem First-time setup: install Python packages, then download engine + models (~8GB, resumable)
 cd /d "%~dp0.."
 echo ============================================================
 echo  1/2 Installing Python packages (~30MB)
-echo  2/2 Downloading llama.cpp + Qwen2.5-7B model (~5GB)
+echo  2/2 Downloading llama.cpp + Qwen2.5-7B + Qwen3-VL-4B (~8GB)
+echo      (text model 4.4GB, vision model 3.2GB; Ctrl+C then run
+echo       "python tools\download.py --no-vision" to skip the vision one)
 echo ============================================================
 where python >nul 2>nul
 if errorlevel 1 (
