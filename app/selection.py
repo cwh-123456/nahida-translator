@@ -109,7 +109,8 @@ class SelectionWatcher:
     """监听鼠标拖选与全局快捷键，把选中的文本回调给上层。"""
 
     def __init__(self, on_selection, should_ignore=None, on_press=None, hotkey="",
-                 on_scroll=None, on_escape=None, on_hotkey_image=None, on_single_click=None):
+                 on_scroll=None, on_escape=None, on_hotkey_image=None, on_single_click=None,
+                 on_mouse_move=None):
         self.on_selection = on_selection
         self.should_ignore = should_ignore or (lambda x, y: False)
         self.on_press = on_press
@@ -118,6 +119,9 @@ class SelectionWatcher:
         # 必须区分开，否则一拖就被面板抢走。
         # 名字刻意不叫 on_click：下面有个同名方法 _on_click 是 pynput 的回调
         self.on_single_click = on_single_click
+        # 鼠标移动：用于"悬停到面板按钮上就提前解除穿透"。
+        # 这个回调会被非常频繁地调（每个移动事件），实现里必须只做整数比较。
+        self.on_mouse_move = on_mouse_move
         self.on_scroll = on_scroll
         self.on_escape = on_escape
         # 剪贴板里是图片时优先翻图（配合 Win+Shift+S）；返回 True 表示已接管
@@ -143,7 +147,9 @@ class SelectionWatcher:
     def _start_listeners(self) -> None:
         try:
             self._mouse_listener = mouse.Listener(
-                on_click=self._safe(self._on_click), on_scroll=self._safe(self._on_scroll)
+                on_click=self._safe(self._on_click),
+                on_scroll=self._safe(self._on_scroll),
+                on_move=self._safe(self._on_move) if self.on_mouse_move else None,
             )
             self._mouse_listener.start()
         except Exception:
@@ -202,6 +208,15 @@ class SelectionWatcher:
             return
         try:
             self.on_scroll(x, y, dx, dy)
+        except Exception:
+            pass
+
+    def _on_move(self, x, y, *_extra) -> None:
+        """鼠标移动。这个回调每秒可能被调几百次，只允许做整数比较。"""
+        if self.on_mouse_move is None:
+            return
+        try:
+            self.on_mouse_move(x, y)
         except Exception:
             pass
 

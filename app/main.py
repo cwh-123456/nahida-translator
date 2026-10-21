@@ -169,6 +169,7 @@ class TranslatorApp:
         self._shutting_down = False
         self._mutex = None
         self._mode_btn_rect = None      # 模式按钮的屏幕矩形，钩子线程里用纯算数判断
+        self._hover_armed = True        # 悬停唤醒去抖：每次"进入可操作区"只投递一次
         self._shotting = False          # 框选截图进行中：钩子线程据此忽略划词
         self._hotkeys = HotkeyManager()
         self._shot_hotkey = ""          # 实际注册成功的截图热键（可能因占用而顺延）
@@ -204,6 +205,7 @@ class TranslatorApp:
             on_escape=self._on_escape,
             on_hotkey_image=self._clipboard_image_hotkey,
             on_single_click=self._on_panel_click,
+            on_mouse_move=self._on_mouse_move,
         )
         self.watcher.enabled = not self.paused
         self.tray = None
@@ -295,6 +297,37 @@ class TranslatorApp:
         if self.result.click_in_body(x, y):
             return
         self.result.wake()
+
+    def _on_mouse_move(self, x: int, y: int) -> None:
+        """鼠标移动（钩子线程，极高频）：悬停到面板按钮区就提前解除穿透。
+
+        这样"第一下点击"就打在面板上。之前只能靠单击后唤醒，是因为穿透状态
+        下 Windows 已经把那一击派发给下面的程序，钩子救不回来——唯一可靠的办法
+        是在鼠标"移过去"的那一刻就把穿透关掉。
+
+        只做整数比较，且用 _hover_armed 去抖：每次进入只投递一次队列事件，
+        否则每秒几百个事件会把主线程压垮。
+        """
+        try:
+            if self._shotting:
+                return
+            if not self.result.fast_visible() or not self.result.click_through():
+                # 面板没开 / 本来就可点：下次进入时重新允许投递
+                self._hover_armed = True
+                return
+            if not self._hover_armed:
+                return
+            if self.result.action_zone_contains(x, y):
+                self._hover_armed = False
+                self.q.put(("panel_hover",))
+        except Exception:
+            pass
+
+    def _apply_panel_hover(self) -> None:
+        """主线程：悬停唤醒，只改穿透位，不动层级（层级交给 250ms 巡检）。"""
+        if not self.result.visible():
+            return
+        self.result.hover_wake()
 
     def _panel_hit(self, x: int, y: int) -> bool:
         """面板是否在这个坐标上“真的挡住”鼠标（穿透状态下不算）。"""
@@ -617,6 +650,8 @@ class TranslatorApp:
             self.icon.hide()
         elif kind == "panel_click":
             self._apply_panel_click(item[1], item[2])
+        elif kind == "panel_hover":
+            self._apply_panel_hover()
         elif kind == "show_window":
             self._show_window()
         elif kind == "dock_click":
@@ -1046,6 +1081,8 @@ class TranslatorApp:
             if self.mode_popup.visible() and self.result.visible():
                 self._mode_btn_rect = self._widget_rect(self.result.mode_label)
             if self.result.visible():
+                # 正文区矩形的缓存，钩子线程靠它区分"正文"和"按钮区"
+                self.result.refresh_zones()
                 if manual:
                     self.result.apply_click_through(True)
                 elif bool(ui.get("panel_auto_passthrough", True)):
@@ -1053,7 +1090,16 @@ class TranslatorApp:
                         fg = ctypes.windll.user32.GetForegroundWindow()
                     except Exception:
                         fg = 0
+                    # 鼠标正停在标题带/按钮上：别切回穿透，否则鼠标不动就会
+                    # 一直"看得到点不着"（悬停唤醒只发生在移动的那一刻）
+                    try:
+                        hx, hy = self.root.winfo_pointerxy()
+                        hovering = self.result.action_zone_contains(hx, hy)
+                    except Exception:
+                        hovering = False
                     if fg and fg in self._our_hwnds():
+                        self.result.touch()
+                    elif hovering:
                         self.result.touch()
                     elif time.time() > getattr(self.result, "_interactive_until", 0.0):
                         self.result.apply_click_through(True)

@@ -1003,6 +1003,11 @@ class DockButton:
 WS_EX_TRANSPARENT = 0x20
 GWL_EXSTYLE = -20
 
+# 面板在"结果已经出现"之后保持可交互的秒数。
+# 之前是 6 秒，且只从 open()（任务开始）算——图片翻译要 12 秒，结果到手时
+# 早就过期了，用户点叉必然要点两下。现在由 touch() 在结果/每个 token 时重置。
+INTERACTIVE_SECONDS = 30.0
+
 
 def set_click_through(win: tk.Toplevel, enable: bool) -> bool:
     """让窗口鼠标穿透（点击穿透到下面的程序），用于面板挡住所选文字时。"""
@@ -1241,6 +1246,9 @@ class ResultWindow:
         self._geom_cache = (0, 0, 1, 1)
         self._interactive_until = 0.0
         self._click_through = False
+        # 正文区的屏幕矩形（x, y, w, h）。钩子线程只读这个缓存做算数判断，
+        # 绝不碰 Tk；主线程每 250ms 刷新一次。
+        self._body_rect: tuple[int, int, int, int] | None = None
         self._resize_origin = None
         self._resize_dir = None
         self._resize_strips: dict[str, tk.Frame] = {}
@@ -1879,11 +1887,11 @@ class ResultWindow:
             self.apply_click_through(True)  # 手动指定“始终穿透”
         else:
             self.touch()
+        self.refresh_zones()
 
     @property
     def position(self) -> tuple[int, int]:
         return self._x, self._y
-
     def set_mode(self, mode: str) -> None:
         """模式按钮文字：显示当前选择的模式。"""
         self._mode_text = MODE_TITLES.get(mode, "自动识别")
@@ -1935,6 +1943,7 @@ class ResultWindow:
             self.apply_click_through(True)  # 手动指定“始终穿透”
         else:
             self.touch()
+        self.refresh_zones()
 
     def set_status(self, text: str) -> None:
         if self.status is not None:
@@ -1946,6 +1955,8 @@ class ResultWindow:
     def append(self, piece: str) -> None:
         if self.text is None:
             return
+        # 翻译进行中也要保持可点：用户随时可能想点叉取消（上一轮刚做的取消机制）
+        self.touch()
         if self.text.get("1.0", "end-1c") == "" and self.status is not None \
                 and self.status.cget("text").startswith("正在"):
             self.set_status("")
@@ -1968,12 +1979,16 @@ class ResultWindow:
 
     def finish(self, seconds: float, tokens: int) -> None:
         self.set_status(f"本地模型 · {seconds:.1f}s")
+        # 结果出现的这一刻才算"用户开始看结果"：重置可交互窗口，
+        # 否则图片翻译（十几秒）会一出现就处于穿透状态，点叉要点两下。
+        self.touch()
         self._schedule_fit(force=True)
 
     def show_error(self, message: str) -> None:
         self._plain = ""
         self._set_text(message)
         self.set_status("出错了")
+        self.touch()
 
     # ---------- 文字 + 公式混排 ----------
     def _set_rich(self, value: str) -> None:
@@ -2404,13 +2419,58 @@ class ResultWindow:
         """是否处于鼠标穿透状态（穿透时点击落不到面板上）。"""
         return self._click_through
 
-    def touch(self) -> None:
-        """用户正在使用面板：保持可交互（并取消穿透）。"""
+    def touch(self, seconds: float | None = None) -> None:
+        """用户正在使用面板：保持可交互（并取消穿透）。
+
+        必须在"结果出现/新 token 到达"时也调用，否则可交互窗口是从任务开始
+        算起的——图片翻译要十几秒，结果一到就已经在穿透状态了。
+        """
         import time as _t
 
-        self._interactive_until = _t.time() + 6.0
-        if self._click_through:
+        self._interactive_until = _t.time() + (
+            INTERACTIVE_SECONDS if seconds is None else float(seconds)
+        )
+        # 用户手动勾了"面板始终穿透"就别自作主张恢复可点
+        if self._click_through and not bool(
+                self.cfg["ui"].get("panel_click_through", False)):
             self.apply_click_through(False)
+
+    # ---------- 悬停唤醒（给系统钩子线程用的纯算数判断） ----------
+    def refresh_zones(self) -> None:
+        """主线程：刷新正文区矩形缓存。钩子线程靠它区分"正文"和"按钮区"。"""
+        if self.text is None or self.win is None:
+            self._body_rect = None
+            return
+        try:
+            self._body_rect = (
+                self.text.winfo_rootx(), self.text.winfo_rooty(),
+                self.text.winfo_width(), self.text.winfo_height(),
+            )
+        except tk.TclError:
+            self._body_rect = None
+
+    def action_zone_contains(self, x: int, y: int) -> bool:
+        """这个屏幕坐标是不是落在"可操作区"（标题带 / 按钮 / 边角 / 滚动条）。
+
+        排除正文区：半透明面板下能看见底下的字，点正文的人是想要选那些字。
+        纯算数，钩子线程可以调。
+        """
+        if not self.fast_contains(x, y):
+            return False
+        rect = self._body_rect
+        if not rect:
+            return True
+        bx, by, bw, bh = rect
+        return not (bx <= x <= bx + bw and by <= y <= by + bh)
+
+    def hover_wake(self) -> None:
+        """鼠标悬停在可操作区：提前把穿透关掉，让"这一下点击"就打在面板上。
+
+        与 wake() 的区别：不抬窗、不抢层级，只改穿透位。层级错乱由 250ms
+        巡检的 keep_bg_below() 负责，钩子线程触发时不该做重活。
+        """
+        self.apply_click_through(False)
+        self.touch()
 
     def apply_click_through(self, enable: bool) -> None:
         """面板 + 背景层一起鼠标穿透（开启后点击直接落到下面的程序）。"""
