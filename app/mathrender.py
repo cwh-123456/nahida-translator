@@ -617,6 +617,11 @@ def _render_env(env: str, body: str, px: int, dpi: float, color: str,
             canvas.alpha_composite(img, (int(cx), max(0, int(round(base - d)))))
         y += rows_h[i] + rowgap
 
+    # 右定界符：宽度早就预留好了，但之前一直没画上来——表现为矩阵只剩左边的 "["
+    if rimg is not None:
+        canvas.alpha_composite(
+            rimg, (max(0, int(total_w) - rimg.width), max(0, (total_h - rimg.height) // 2)))
+
     # 矩阵以数学轴为中心，数学轴大约在基线上方 0.25em
     depth = total_h / 2.0 - px * 0.25 * SUPERSAMPLE
     return canvas, max(0.0, depth)
