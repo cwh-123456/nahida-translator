@@ -299,7 +299,8 @@ class TranslatorApp:
         其余情况（点「译」、托盘打开）沿用上次记住的位置。
         """
         if self.result.visible():
-            self.result.lift()
+            # 面板已经开着：只把它和背景层抬到最前，不要重建内容
+            self.result._raise_self()
             return
         pos = None if first else self.cfg.get("ui", {}).get("window_pos")
         self.result.show_empty(pos=tuple(pos) if pos else None)
@@ -728,6 +729,13 @@ class TranslatorApp:
         try:
             ui = self.cfg["ui"]
             manual = bool(ui.get("panel_click_through", False))
+            # 兜底不变量：面板不可见时，背景层绝不能单独留在屏幕上
+            # （背景层是独立窗口，任何未知路径把它重新显示出来，都会表现成"只剩一块动图"）
+            if not self.result.visible():
+                bg = getattr(self.result, "bg", None)
+                if bg is not None and bg.win is not None and bg.win.winfo_ismapped():
+                    bg.hide()
+                    log.warning("面板不可见但背景层仍在显示，已强制隐藏")
             if self.result.visible():
                 if manual:
                     self.result.apply_click_through(True)

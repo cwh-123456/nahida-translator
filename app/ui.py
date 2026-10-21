@@ -1089,6 +1089,14 @@ class PanelBackground:
             self._region = (w, h)
 
     # ---------- 播放 ----------
+    def pause(self) -> None:
+        """暂停播放：拖动/缩放面板时调用，避免逐帧 PIL 运算拖慢主线程。"""
+        self._cancel()
+
+    def resume(self) -> None:
+        if self.win is not None and self.win.winfo_ismapped():
+            self._schedule()
+
     def _schedule(self) -> None:
         self._cancel()
         if not self._frames:
@@ -1169,6 +1177,8 @@ class ResultWindow:
         self._panel_alpha = float(cfg["ui"].get("panel_alpha", 0.72)) if bg_gif else 1.0
         self._syncing_bg = False
         self._bg_geom: tuple[int, int, int, int] | None = None
+        self._topmost_job = None
+        self._verify_jobs: list = []
 
     # ---------- 构建 ----------
     def _build(self) -> None:
@@ -1186,6 +1196,10 @@ class ResultWindow:
             except tk.TclError:
                 pass
         win.bind("<Configure>", self._on_win_configure, add="+")
+        # 背景层是独立窗口，只能靠事件保证它和面板同生共死：
+        # 面板一旦 Unmap（任何路径隐藏，不只是 close()），立刻把背景收掉。
+        win.bind("<Unmap>", self._on_panel_unmap, add="+")
+        win.bind("<Map>", self._on_panel_map, add="+")
         outer = tk.Frame(win, bg=BORDER)
         outer.pack(fill="both", expand=True)
         body = tk.Frame(outer, bg=BG)
@@ -1318,16 +1332,133 @@ class ResultWindow:
                 return
             self._bg_geom = geom
             self.bg.sync(*geom)
-            # 背景永远压在面板下面，但不要抬升面板（抬升会抢到前台程序上面）
-            if self.bg.win is not None:
-                try:
-                    self.bg.win.lower(self.win)
-                except tk.TclError:
-                    pass
+            # 这里不要再调用 bg.lower(win)：每次移动都改一次 z-order 会触发背景层整窗重绘，
+            # 拖动时肉眼就能看到动图比面板慢半拍。z-order 只在显示/抬升时调整一次。
         except tk.TclError:
             pass
         finally:
             self._syncing_bg = False
+
+    def _sync_bg_at(self, x: int, y: int, w: int | None = None, h: int | None = None) -> None:
+        """按「将要变成」的几何同步背景层。
+
+        拖动/缩放时面板的 wm geometry 还排在队列里，这时 winfo_x/y 可能还是旧值，
+        用它去对齐背景就会稳定落后一帧。这里直接用调用方算好的目标坐标。
+        """
+        if not self._shown or self.bg is None or self.win is None:
+            return
+        try:
+            if w is None or h is None:
+                w, h = self.win.winfo_width(), self.win.winfo_height()
+        except tk.TclError:
+            return
+        if w <= 4 or h <= 4:
+            return
+        geom = (int(x), int(y), int(w), int(h))
+        if geom == self._bg_geom:
+            return
+        self._bg_geom = geom
+        self.bg.sync(*geom)
+
+    # ---------- 面板与背景层的可见性绑定 ----------
+    def _is_self_event(self, event) -> bool:
+        """只认面板窗口自身的事件，忽略子控件冒泡上来的 Map/Unmap。"""
+        if event is None:
+            return True
+        widget = getattr(event, "widget", None)
+        return widget is None or widget is self.win
+
+    def _on_panel_unmap(self, event=None) -> None:
+        """面板被隐藏：背景层必须同时隐藏。
+
+        任何隐藏路径（close、异常、后续新增的代码）都会触发 Unmap，
+        所以这里兜住的是"面板没了但背景还留在屏幕上"这一类问题。
+
+        注意：bind 在 Toplevel 上时，子控件的 Map/Unmap 也会冒泡到这里
+        （滚动条显隐、文本换行都会触发），必须按 event.widget 过滤，
+        否则会把"某个子控件被隐藏"误判成"面板被隐藏"。
+        """
+        if not self._is_self_event(event):
+            return
+        unexpected = self._shown
+        if unexpected:
+            self._shown = False
+            for attr in ("_fit_job", "_header_job", "_topmost_job"):
+                job = getattr(self, attr, None)
+                if job is not None:
+                    try:
+                        self.root.after_cancel(job)
+                    except Exception:
+                        pass
+                    setattr(self, attr, None)
+        if self.bg is not None:
+            self.bg.hide()
+        if unexpected:
+            log.warning("面板被非预期隐藏（未经过 close），已同步隐藏背景层")
+
+    def _on_panel_map(self, event=None) -> None:
+        """面板重新显示：确保背景层也在，并且贴着当前几何。"""
+        if not self._is_self_event(event):
+            return
+        if not self._shown or self.bg is None or self.win is None:
+            return
+        try:
+            w, h = self.win.winfo_width(), self.win.winfo_height()
+            if w <= 4 or h <= 4:
+                return
+            if self.bg.win is None or not self.bg.win.winfo_ismapped():
+                self.bg.show(self._x, self._y, w, h)
+            else:
+                self.bg.sync(self._x, self._y, w, h)
+            self._bg_geom = (self._x, self._y, w, h)
+        except tk.TclError:
+            pass
+
+    def _cancel_verify(self) -> None:
+        """取消关闭时排队的复查任务（面板重新显示时必须清掉）。"""
+        for job in self._verify_jobs:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        self._verify_jobs.clear()
+
+    def _verify_hidden(self, tag: str = "") -> None:
+        """关闭后复查：面板与背景层在系统层面都不能还可见。
+
+        这里只用只读的系统调用（GetAncestor / IsWindowVisible）判断，
+        真需要再隐藏时走 Tk 的 withdraw()。
+        不能在 Tk 窗口上调用 SetWindowPos / ShowWindow 这类会发窗口消息的 API：
+        Windows 会同步派发 WM_WINDOWPOSCHANGING，重入 Tk 的 <Configure> 回调，
+        而此刻 ctypes 正持有释放状态的 GIL，会造成解释器致命错误。
+        """
+        # 面板又打开了就别管：这是上一次关闭留下的延迟复查，
+        # 不能让它把刚恢复显示的面板再藏起来
+        if self._shown:
+            return
+        try:
+            import ctypes
+
+            u32 = ctypes.windll.user32
+            targets = [("面板", self.win)]
+            if self.bg is not None:
+                targets.insert(0, ("背景层", self.bg.win))
+            for name, win in targets:
+                if win is None:
+                    continue
+                try:
+                    hwnd = u32.GetAncestor(win.winfo_id(), 2)
+                    still = bool(hwnd) and bool(u32.IsWindowVisible(hwnd))
+                except tk.TclError:
+                    continue
+                if still:
+                    try:
+                        win.withdraw()
+                    except tk.TclError:
+                        pass
+                    log.warning("关闭后%s仍然可见%s，已再次隐藏", name, tag)
+        except Exception:
+            pass
 
     def _raise_with_bg(self) -> None:
         """把面板抬到最前，并保证背景层紧贴在它下面。"""
@@ -1348,17 +1479,26 @@ class ResultWindow:
             self._raise_with_bg()
             try:
                 self.win.attributes("-topmost", True)
-                self.root.after(80, self._clear_topmost)
+                if self._topmost_job is not None:
+                    try:
+                        self.root.after_cancel(self._topmost_job)
+                    except Exception:
+                        pass
+                self._topmost_job = self.root.after(80, self._clear_topmost)
             except tk.TclError:
                 pass
         except tk.TclError:
             pass
 
     def _clear_topmost(self) -> None:
+        self._topmost_job = None
+        # 面板已经关了就别再动它：在隐藏窗口上改 topmost / z-order 属于多余动作
+        if not self._shown:
+            return
         try:
-            if self.win is not None and self.bg is not None:
-                # 面板恢复普通层级，背景重新贴到面板下面
+            if self.win is not None:
                 self.win.attributes("-topmost", False)
+            if self.bg is not None and self.bg.win is not None and self.bg.win.winfo_ismapped():
                 self.bg.win.lower(self.win)
         except tk.TclError:
             pass
@@ -1469,6 +1609,7 @@ class ResultWindow:
         """显示一个空的翻译面板（启动时 / 托盘点开时）。"""
         if self.win is None:
             self._build()
+        self._cancel_verify()
         self._source = ""
         if self.source_label is not None:
             self.source_label.configure(text="")
@@ -1512,6 +1653,7 @@ class ResultWindow:
     def open(self, x: int, y: int, source: str, status: str = "正在翻译…") -> None:
         if self.win is None:
             self._build()
+        self._cancel_verify()
         was_visible = self.visible()
         self._source = source
         if self.source_label is not None:
@@ -1668,6 +1810,8 @@ class ResultWindow:
             self._x, self._y,
             self.win.winfo_width(), self.win.winfo_height(),
         )
+        if self.bg is not None:
+            self.bg.pause()
         return "break"
 
     def _edge_drag(self, event):
@@ -1711,12 +1855,15 @@ class ResultWindow:
         self._x, self._y = int(x), int(y)
         self.win.geometry(f"{self.width}x{self.min_h}+{self._x}+{self._y}")
         self._apply_round_region()
-        self._sync_bg()
+        self._geom_cache = (self._x, self._y, self.width, self.min_h)
+        self._sync_bg_at(self._x, self._y, self.width, self.min_h)
         return "break"
 
     def _edge_release(self, _event=None):
         self._resize_dir = None
         self._resize_origin = None
+        if self.bg is not None:
+            self.bg.resume()
         if self.on_close:
             try:
                 self.on_close()  # 保存尺寸/位置
@@ -1754,6 +1901,10 @@ class ResultWindow:
     def _drag_start(self, event):
         self._drag_dx = event.x_root - self.win.winfo_x()
         self._drag_dy = event.y_root - self.win.winfo_y()
+        # 拖动时先停掉动图刷新：每帧都要做一次 PIL 缩放裁切，会拖慢主线程，
+        # 表现出来就是"背景比面板慢半拍"。
+        if self.bg is not None:
+            self.bg.pause()
 
     def _drag_move(self, event):
         if self.win is None:
@@ -1762,11 +1913,14 @@ class ResultWindow:
         y = event.y_root - getattr(self, "_drag_dy", 0)
         self.win.geometry(f"+{x}+{y}")
         self._x, self._y = x, y
-        self._sync_bg()
+        self._geom_cache = (x, y, self._geom_cache[2], self._geom_cache[3])
+        self._sync_bg_at(x, y)
 
     def _drag_end(self, _event=None):
         """拖动结束：记住位置，下次点「译」直接回到这里。"""
         self._drag_dx = self._drag_dy = 0
+        if self.bg is not None:
+            self.bg.resume()
         if self.on_close:
             try:
                 self.on_close()
@@ -1782,7 +1936,7 @@ class ResultWindow:
         self._shown = False
         # 取消挂起的重排/重绘：面板关了就不该再有任何回调去动窗口，
         # 否则 _fit() 会在关闭之后再写一次几何和圆角区域，把图层搅乱
-        for attr in ("_fit_job", "_header_job"):
+        for attr in ("_fit_job", "_header_job", "_topmost_job"):
             job = getattr(self, attr, None)
             if job is not None:
                 try:
@@ -1790,14 +1944,23 @@ class ResultWindow:
                 except Exception:
                     pass
                 setattr(self, attr, None)
-        # 先收面板、再收背景：万一中途出岔子，也不会只剩一块背景图飘在桌面上
+        # 先收背景层：它只是面板的装饰，任何时刻都不该比面板活得久
+        if self.bg is not None:
+            self.bg.hide()
         if self.win is not None:
             try:
                 self.win.withdraw()
             except tk.TclError:
                 pass
-        if self.bg is not None:
-            self.bg.hide()
+        self._verify_hidden("（关闭时）")
+        # 再复查两次：防止排队中的回调、或系统合成器的最后一帧让某一层留在屏幕上
+        self._cancel_verify()
+        for delay in (250, 900):
+            try:
+                job = self.root.after(delay, self._verify_hidden, f"（关闭后 {delay}ms）")
+                self._verify_jobs.append(job)
+            except Exception:
+                pass
         if self.on_close:
             try:
                 self.on_close()
