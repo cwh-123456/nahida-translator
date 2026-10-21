@@ -27,9 +27,9 @@ ACCENT = "#9be26f"      # 草元素绿（高亮）
 ACCENT_DIM = "#5f9e4a"  # 深一档草绿
 GOLD = "#e9c97d"        # 金色点缀（微光/星点）
 
-# 两套配色。leaf 是纳西妲主题（默认，用于划词翻译）；
-# light 是白底黑字，专给截图/图片翻译用——面板的目的是"读一页纸"，
-# 半透明的绿色玻璃配上深色壁纸只会让正文更难认，白底最接近 PDF 阅读器。
+# 两套配色。leaf 是纳西妲主题，划词翻译和图片翻译都用它，整个程序一个绿。
+# light 是白底黑字，目前没有入口在用，只是留着：万一以后想加"白底阅读模式"
+# （截图内容多是白纸文档时更接近 PDF 阅读器），换主题的骨架已经在这了。
 LEAF = {
     "name": "leaf",
     "bg": BG, "bg_soft": BG_SOFT, "border": BORDER,
@@ -1241,7 +1241,7 @@ class ResultWindow:
         self._scroll_shown = False
 
         # 背景动画层：面板半透明，让底下的动图透出来。
-        # 中性主题（截图/图片翻译）不要这一层：它只会把壁纸的绿透进正文里。
+        # 只有 leaf 主题（纳西妲绿）要这一层；light 主题是实心白底，不需要动图。
         self._bg_gif_path = bg_gif
         self.bg = PanelBackground(root, bg_gif) if (bg_gif and self.th["gif"]) else None
         self._panel_alpha = self._alpha_from_cfg()
@@ -1263,7 +1263,11 @@ class ResultWindow:
             return 0.72
 
     def set_style(self, style: str) -> None:
-        """切换配色：leaf（纳西妲绿）/ light（白底黑字，截图与图片翻译用）。
+        """切换配色：leaf（纳西妲绿）/ light（白底黑字）。
+
+        当前产品决定是「图片翻译和划词翻译都用纳西妲绿」，两条路径都传 leaf，
+        所以 light 平时不会被用到，留着是因为换主题的骨架已经在这了：以后想加
+        「白底阅读模式」只要给按钮接一句 set_style("light")，布局代码不用动。
 
         面板是长生命周期的单例，已经建好的控件不会认新颜色，所以换主题时
         直接销毁窗口，下次 show 时按新主题重新 _build 一次。
@@ -1283,7 +1287,7 @@ class ResultWindow:
             self.bg = None
         if self.th["gif"] and self._bg_gif_path:
             self.bg = PanelBackground(self.root, self._bg_gif_path)
-        self._panel_alpha =         self._alpha_from_cfg()
+        self._panel_alpha = self._alpha_from_cfg()
         self._destroy_window()
 
     def _destroy_window(self) -> None:

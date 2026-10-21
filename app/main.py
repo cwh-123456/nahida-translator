@@ -678,9 +678,8 @@ class TranslatorApp:
             status = "正在识别图片（纯 CPU，约 10~30 秒）…"
         else:
             status = "缺少视觉模型，见下方提示"
-        # 图片翻译走浅色配色：白底黑字，像 PDF 阅读器 / QQ 截图的预览，
-        # 而不是半透明的主题色玻璃
-        self.result.set_style("light")
+        # 图片翻译和划词翻译用同一套纳西妲绿配色，别一会儿白底一会儿绿底
+        self.result.set_style("leaf")
         self.result.open(0, 0, origin, status)
         log.info("开始图片翻译：%s，模式 %s", origin, mode)
         threading.Thread(

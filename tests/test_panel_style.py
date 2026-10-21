@@ -116,10 +116,25 @@ def style_switch() -> bool:
     return ok
 
 
+def both_paths_green() -> bool:
+    """产品决定：图片翻译和划词翻译都用纳西妲绿，谁都不许偷偷切白底。
+
+    直接读 main.py 的两个入口，比重启整个 App 去点按钮快得多。
+    """
+    import re
+
+    src = open(os.path.join(ROOT, "app", "main.py"), encoding="utf-8").read()
+    bad = re.findall(r'set_style\("light"\)', src)
+    n_leaf = len(re.findall(r'set_style\("leaf"\)', src))
+    ok = not bad and n_leaf >= 2
+    print(f"[入口] set_style(leaf) ×{n_leaf}，set_style(light) ×{len(bad)}")
+    return ok
+
+
 def main() -> int:
     n_light, _ = shot("light")
     n_leaf, _ = shot("leaf")
-    ok = n_light >= 3 and n_leaf >= 3 and style_switch()
+    ok = n_light >= 3 and n_leaf >= 3 and style_switch() and both_paths_green()
     print("结果:", "PASS" if ok else "FAIL", f"(浅色 {n_light} / 绿色 {n_leaf})")
     return 0 if ok else 1
 
