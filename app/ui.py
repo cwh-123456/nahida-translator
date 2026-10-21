@@ -1040,6 +1040,61 @@ def mouse_left_down() -> bool:
         return True
 
 
+def move_together(items) -> bool:
+    """把多个窗口在**同一批**里摆到位（DeferWindowPos，原子移动）。
+
+    为什么不直接用 Tk 的 `geometry()`：它只是记账，真正的 SetWindowPos 排在
+    Tk 的 idle 队列里。拖动的每个鼠标事件都会记一次，而快速拖动时事件把队列
+    刷满、idle 迟迟轮不上，两个窗口的 SetWindowPos 之间就可能夹进系统合成
+    的一帧——用户看到的就是"背景动图落后于面板，手一停就追上来"。
+
+    这里绕开 Tk 直接批量下发：Begin/EndDeferWindowPos 之间系统不会重画，
+    所以不存在"只挪了其中一个"的中间态。
+
+    items: [(toplevel, x, y, w, h), ...]
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        u32 = ctypes.windll.user32
+        prepared = []
+        for win, x, y, w, h in items:
+            if win is None:
+                return False
+            hwnd = u32.GetAncestor(win.winfo_id(), 2)
+            if not hwnd:
+                return False
+            prepared.append((hwnd, int(x), int(y), max(int(w), 1), max(int(h), 1)))
+        if not prepared:
+            return False
+
+        u32.BeginDeferWindowPos.restype = ctypes.c_void_p
+        u32.BeginDeferWindowPos.argtypes = [ctypes.c_int]
+        u32.DeferWindowPos.restype = ctypes.c_void_p
+        u32.DeferWindowPos.argtypes = [
+            ctypes.c_void_p, wintypes.HWND, wintypes.HWND,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+        ]
+        u32.EndDeferWindowPos.restype = wintypes.BOOL
+        u32.EndDeferWindowPos.argtypes = [ctypes.c_void_p]
+
+        SWP_NOZORDER = 0x0004   # 别动层级：背景必须留在面板下面
+        SWP_NOACTIVATE = 0x0010  # 别抢焦点
+        hdwp = u32.BeginDeferWindowPos(len(prepared))
+        if not hdwp:
+            return False
+        for hwnd, x, y, w, h in prepared:
+            hdwp = u32.DeferWindowPos(
+                hdwp, hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE
+            )
+            if not hdwp:
+                return False
+        return bool(u32.EndDeferWindowPos(hdwp))
+    except Exception:
+        return False
+
+
 def sys_rect(win: tk.Toplevel) -> tuple[int, int, int, int] | None:
     """窗口在系统里的真实矩形 (x, y, w, h)。
 
@@ -1341,6 +1396,8 @@ class ResultWindow:
         self._resize_origin = None
         self._resize_dir = None
         self._drag_active = False
+        # 拖动/缩放期间被推迟的重排（松手后补一次），见 _fit()
+        self._fit_deferred = False
         self._resize_strips: dict[str, tk.Frame] = {}
         self.scroll: tk.Scrollbar | None = None
         self._scroll_shown = False
@@ -1620,6 +1677,21 @@ class ResultWindow:
             return
         self._bg_geom = geom
         self.bg.sync(*geom)
+
+    def _move_both(self, x: int, y: int, w: int, h: int) -> None:
+        """把面板和背景层原子地摆到同一位置、同一尺寸。
+
+        Tk 的 geometry() 只记账，SetWindowPos 要等 idle。拖动时每个鼠标事件都
+        记一次，快速拖动会把 idle 挤到后面，于是"面板已经动了、背景还没动"，
+        截图和肉眼都能看到错位，手一停又自己恢复。这里直接批量下发，
+        两个窗口在同一批里移动，中间没有只动一个的时刻。
+        """
+        if self.bg is None or self.bg.win is None:
+            return
+        move_together([
+            (self.win, x, y, w, h),
+            (self.bg.win, x, y, w, h),
+        ])
 
     # ---------- 面板与背景层的可见性绑定 ----------
     def _is_self_event(self, event) -> bool:
@@ -2303,6 +2375,12 @@ class ResultWindow:
 
     def _fit(self) -> None:
         self._fit_job = None
+        # 拖 / 缩放面板的时候不做重排：重排要改高度、还要重新渲染背景帧图
+        # （6ms 量级），夹在两个鼠标事件之间就会把"两个窗口一起动"这个原子性
+        # 打断——用户看到的就是背景动图起步慢半拍。松手时补一次就够了。
+        if getattr(self, "_drag_active", False) or getattr(self, "_resize_dir", None):
+            self._fit_deferred = True
+            return
         # 面板已经关了就别再算高度：关闭时 _fit 可能还排在队列里，
         # 它会重新写几何 + 重设圆角，正是"关了又冒出半块东西"的来源
         if not self._shown:
@@ -2349,9 +2427,13 @@ class ResultWindow:
             # 命中判断（悬停唤醒 / 单击唤醒）用的是这个缓存，不更新的话
             # 面板长高之后下半截会被当成"面板外"
             self._geom_cache = (self._x, y, self.width, h)
+            # 顺序很重要：下面 _toggle_scroll / _apply_round_region 里都有
+            # update_idletasks()，会把面板的新尺寸**立刻**画出来；那之前必须
+            # 先把背景层跟到同一尺寸，否则多出来的那一条就是露底的空白。
+            self._sync_bg_at(self._x, y, self.width, h)
+            self._move_both(self._x, y, self.width, h)
             self._toggle_scroll()
             self._apply_round_region()
-            self._sync_bg()
         except tk.TclError:
             pass
 
@@ -2424,9 +2506,12 @@ class ResultWindow:
         self.min_h = int(h)
         self._x, self._y = int(x), int(y)
         self.win.geometry(f"{self.width}x{self.min_h}+{self._x}+{self._y}")
-        self._apply_round_region()
         self._geom_cache = (self._x, self._y, self.width, self.min_h)
+        # 同 _fit：_apply_round_region 里的 update_idletasks 会先把面板画出来，
+        # 所以背景必须在那之前跟上，并且两个窗口要一批挪完。
         self._sync_bg_at(self._x, self._y, self.width, self.min_h)
+        self._move_both(self._x, self._y, self.width, self.min_h)
+        self._apply_round_region()
         return "break"
 
     def _edge_release(self, _event=None):
@@ -2434,6 +2519,9 @@ class ResultWindow:
         self._resize_origin = None
         if self.bg is not None:
             self.bg.resume()
+        if getattr(self, "_fit_deferred", False):
+            self._fit_deferred = False
+            self._schedule_fit(force=True)
         self.keep_bg_aligned()
         if self.on_close:
             try:
@@ -2495,7 +2583,11 @@ class ResultWindow:
         self._geom_cache = (x, y, self._geom_cache[2], self._geom_cache[3])
         # 用缓存里的尺寸而不是 winfo：拖动时流式翻译还在长高，刚写的 geometry
         # 可能还没生效，读 winfo 会拿到上一帧的宽高
-        self._sync_bg_at(x, y, self._geom_cache[2], self._geom_cache[3])
+        w, h = self._geom_cache[2], self._geom_cache[3]
+        self._sync_bg_at(x, y, w, h)
+        # 上面两行都只是让 Tk 记账，真正落到屏幕上要等 idle。拖动时事件一个接
+        # 一个，idle 可能排不上，于是面板先动、背景后动。这里再原子挪一次。
+        self._move_both(x, y, w, h)
 
     def release_stale_drag(self) -> None:
         """左键已经松开、但松开事件没落到面板上（在窗口外松手）时清掉拖动状态。
@@ -2505,6 +2597,9 @@ class ResultWindow:
         """
         if getattr(self, "_drag_active", False) and not mouse_left_down():
             self._drag_active = False
+            if getattr(self, "_fit_deferred", False):
+                self._fit_deferred = False
+                self._schedule_fit(force=True)
 
     def _drag_end(self, _event=None):
         """拖动结束：记住位置，下次点「译」直接回到这里。"""
@@ -2512,6 +2607,10 @@ class ResultWindow:
         self._drag_active = False
         if self.bg is not None:
             self.bg.resume()
+        # 拖动期间攒下的重排在这里一次性补上（拖动中不做，见 _fit）
+        if getattr(self, "_fit_deferred", False):
+            self._fit_deferred = False
+            self._schedule_fit(force=True)
         # 松手时也核一次：拖动过程中若有一次背景没跟上，这里立刻补回来
         self.keep_bg_aligned()
         if self.on_close:
