@@ -32,3 +32,6 @@ desktop.ini
 # 临时文件
 tmp*
 browser-screenshots/
+
+# 本地验证手册（仅自己看，不进仓库）
+验证手册.html
