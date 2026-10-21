@@ -156,6 +156,7 @@ class TranslatorApp:
         self.paused = bool(cfg.get("pause", False))
         self._shutting_down = False
         self._mutex = None
+        self._mode_btn_rect = None      # 模式按钮的屏幕矩形，钩子线程里用纯算数判断
 
         self.root = tk.Tk()
         self.root.withdraw()
@@ -226,7 +227,10 @@ class TranslatorApp:
     def _on_any_press(self, x: int, y: int) -> None:
         """钩子线程里只能用不碰 Tk 的快速判断（否则线程会被 Windows 判超时并移除钩子）。"""
         if self.mode_popup.fast_visible() and not self.mode_popup.fast_contains(x, y):
-            self.q.put(("hide_mode_popup",))
+            # 点「模式」按钮本身不算点外面：那是切换用的，
+            # 否则按下先收起、松开又弹出，看起来就是「再点一次关不掉」
+            if not self._mode_btn_hit(x, y):
+                self.q.put(("hide_mode_popup",))
         if (self.icon.fast_contains(x, y)
                 or self._panel_hit(x, y)
                 or self.dock.fast_contains(x, y)
@@ -326,14 +330,50 @@ class TranslatorApp:
             return btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height() + 6
         return 0, 0
 
-    def _show_panel_mode_menu(self) -> None:
-        """翻译面板左上角「模式」按钮：点开自绘的模式浮层。"""
-        x, y = self._mode_menu_anchor(self.result.mode_label)
+    @staticmethod
+    def _widget_rect(win) -> tuple[int, int, int, int] | None:
+        """控件的屏幕矩形 (x, y, w, h)，拿到后就只是数字，钩子线程也能用。"""
+        if win is None:
+            return None
+        try:
+            return (
+                int(win.winfo_rootx()), int(win.winfo_rooty()),
+                int(win.winfo_width()), int(win.winfo_height()),
+            )
+        except Exception:
+            return None
+
+    def _mode_btn_hit(self, x: int, y: int) -> bool:
+        rect = self._mode_btn_rect
+        if not rect:
+            return False
+        bx, by, bw, bh = rect
+        return bx <= x <= bx + bw and by <= y <= by + bh
+
+    def _toggle_mode_popup(self, btn=None) -> None:
+        """同一个模式浮层的两条入口共用：开着就收起，关着就在 btn 旁边打开。
+
+        btn 为 None 表示从托盘菜单打开：没有可复用的按钮，点击别处照常收起。
+        """
+        if self.mode_popup.visible():
+            self.mode_popup.close()
+            return
+        if btn is not None:
+            x, y = self._mode_menu_anchor(btn)
+            # 记下按钮矩形：钩子线程判断"点在按钮上"时不能碰 Tk，只能读这组数字
+            self._mode_btn_rect = self._widget_rect(btn)
+        else:
+            px, py = self.root.winfo_pointerxy()
+            x, y = px + 4, py + 6
+            self._mode_btn_rect = None
         self.mode_popup.show(x, y, current=self.mode)
 
+    def _show_panel_mode_menu(self) -> None:
+        """翻译面板左上角「模式」按钮：点开自绘的模式浮层（再点一次收起）。"""
+        self._toggle_mode_popup(self.result.mode_label)
+
     def _show_dock_mode_menu(self) -> None:
-        x, y = self.root.winfo_pointerxy()
-        self.mode_popup.show(x + 4, y + 6, current=self.mode)
+        self._toggle_mode_popup(None)
 
     def _toggle_mascot(self, show: bool | None = None) -> None:
         if self.mascot is None:
@@ -736,6 +776,9 @@ class TranslatorApp:
                 if bg is not None and bg.win is not None and bg.win.winfo_ismapped():
                     bg.hide()
                     log.warning("面板不可见但背景层仍在显示，已强制隐藏")
+            # 浮层开着时刷新模式按钮矩形：面板被拖动后仍能正确判断"点在按钮上"
+            if self.mode_popup.visible() and self.result.visible():
+                self._mode_btn_rect = self._widget_rect(self.result.mode_label)
             if self.result.visible():
                 if manual:
                     self.result.apply_click_through(True)
