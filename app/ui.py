@@ -1090,7 +1090,9 @@ class PanelBackground:
         win.withdraw()
         win.overrideredirect(True)
         win.configure(bg="#0b1712")
-        label = tk.Label(win, bd=0, highlightthickness=0, bg="#0b1712")
+        # anchor="nw"：万一窗口比帧图大一两个像素（几何刚写完还没被系统应用），
+        # 让图贴左上角，而不是居中留一圈暗边
+        label = tk.Label(win, bd=0, highlightthickness=0, bg="#0b1712", anchor="nw")
         label.pack(fill="both", expand=True)
         self.win, self.label = win, label
 
@@ -1218,19 +1220,28 @@ class PanelBackground:
                 pass
             self._job = None
 
-    def _render(self):
-        from PIL import Image, ImageTk
+    def _compose(self, w: int, h: int):
+        """把当前帧按 cover 裁到 (w, h)，返回 PIL 图。
 
-        w, h = self._target
+        纵向**必须锚在顶部**（top=0）：居中裁切的话，面板每长高一点，整张动图
+        就跟着往上滑半个高度差——流式翻译里每 80ms 长一次，看到的就是"背景
+        和面板不同步、动图在自己往上爬"。锚顶之后变高只是从下面多露出一截。
+        """
+        from PIL import Image
+
         frame = self._frames[self._idx]
         sw, sh = frame.size
         scale = max(w / sw, h / sh)  # cover：填满高度，左右裁掉多余
         nw, nh = max(1, int(round(sw * scale))), max(1, int(round(sh * scale)))
         img = frame.resize((nw, nh), Image.BILINEAR)
         left = max(0, (nw - w) // 2)
-        top = max(0, (nh - h) // 2)
-        img = img.crop((left, top, left + w, top + h))
-        self._photo = ImageTk.PhotoImage(img)
+        return img.crop((left, 0, left + w, h))
+
+    def _render(self):
+        from PIL import ImageTk
+
+        w, h = self._target
+        self._photo = ImageTk.PhotoImage(self._compose(w, h))
         return self._photo
 
 

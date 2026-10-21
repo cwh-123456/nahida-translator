@@ -42,6 +42,40 @@ def img_size(bg) -> tuple[int, int] | None:
     return (photo.width(), photo.height())
 
 
+def content_stability_test(root) -> bool:
+    """面板长高时，背景里"原本看得见的那块"必须原地不动。
+
+    这是用户真正看到的性质。之前裁切是**居中**取的，面板每长高 Δh，整张动图就
+    往上滑 Δh/2——流式翻译每 80ms 长一次，看到的就是"背景自己在往上爬"。
+    实测：300→402 时滑了 51px，正好是高度差的一半。
+    """
+    from PIL import ImageChops, ImageStat
+
+    bg = ui.PanelBackground(root, GIF)
+    bg._load()
+    bg._build()
+    bg.show(100, 100, 520, 300)
+    root.update()
+    ok = True
+    for h1, h2 in ((300, 402), (402, 470), (300, 520)):
+        a = bg._compose(520, h1)
+        b = bg._compose(520, h2)
+        gap = ImageStat.Stat(
+            ImageChops.difference(a, b.crop((0, 0, 520, h1)))
+        ).mean[0]
+        tag = "OK" if gap < 1.0 else "内容位移"
+        print(f"[E] {h1}→{h2}：顶部 {h1} 行平均像素差 {gap:.2f}/255  {tag}")
+        ok = ok and gap < 1.0
+    # 面板高过宽度之后 cover 会开始放大（scale 跟着高度走），这里只用来说明，
+    # 不算失败——正常译文很少长到这个程度
+    tall = ImageStat.Stat(ImageChops.difference(
+        bg._compose(520, 520), bg._compose(520, 640).crop((0, 0, 520, 520))
+    )).mean[0]
+    print(f"[E] 520→640（超高，cover 开始缩放）：{tall:.1f}/255（已知残留）")
+    bg.destroy()
+    return ok
+
+
 def main() -> int:
     if not os.path.exists(GIF):
         print(f"缺少背景动图 {GIF}，跳过")
@@ -99,10 +133,12 @@ def main() -> int:
     print(f"[C] 拖动结束后 tick 恢复：目标 {want} 帧图 {got}")
     ok = ok and got == want
 
+    win.close()
+    ok = content_stability_test(root) and ok
+
     print(f"\n最大高度错位 {worst}px")
     print("结果:", "PASS" if ok else "FAIL")
     try:
-        win.close()
         root.destroy()
     except Exception:
         pass
