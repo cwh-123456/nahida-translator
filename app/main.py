@@ -28,13 +28,16 @@ if ROOT not in sys.path:
 
 from app import config  # noqa: E402
 from app.engine import EngineError, Translator, has_cjk, is_single_word  # noqa: E402
+from app.hotkey import HotkeyManager  # noqa: E402
 from app.selection import SelectionWatcher  # noqa: E402
+from app.shot import RegionSelector, grab_clipboard_image  # noqa: E402
 from app.ui import DockButton, FloatingIcon, MascotWindow, ModePopup, ResultWindow  # noqa: E402
+from app.vision import VisionTranslator  # noqa: E402
 
 log = logging.getLogger("app")
 
 MODE_CHOICES = ("auto", "translate", "zh2en", "summary", "term")
-BUILD = "2026-10-18.2030"  # 启动日志里会打印，用于确认跑的是新代码
+BUILD = "2026-10-21.1930"  # 启动日志里会打印，用于确认跑的是新代码
 
 MODE_LABELS = {
     "auto": "自动识别",
@@ -56,7 +59,11 @@ MODE_DONE = {
     "summary": "长文摘要",
     "term": "术语解释",
     "word": "单词详解",
+    "image": "图片识别（CPU）",
 }
+
+# 图片的提示词固定按"翻成中文"来，所以中译英模式下翻图也走翻译
+IMAGE_MODE_ALIAS = {"auto": "translate", "zh2en": "translate"}
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "EnglishChineseTranslator"
@@ -151,12 +158,16 @@ class TranslatorApp:
         self.cfg = cfg
         self.q: queue.Queue = queue.Queue()
         self.translator = Translator(cfg)
+        self.vision = VisionTranslator(cfg)
         self.pending: tuple[str, int, int] = ("", 0, 0)
         self.busy = False
         self.paused = bool(cfg.get("pause", False))
         self._shutting_down = False
         self._mutex = None
         self._mode_btn_rect = None      # 模式按钮的屏幕矩形，钩子线程里用纯算数判断
+        self._shotting = False          # 框选截图进行中：钩子线程据此忽略划词
+        self._hotkeys = HotkeyManager()
+        self._shot_hotkey = ""          # 实际注册成功的截图热键（可能因占用而顺延）
 
         self.root = tk.Tk()
         self.root.withdraw()
@@ -186,6 +197,7 @@ class TranslatorApp:
             hotkey=cfg.get("hotkey", ""),
             on_scroll=self._on_scroll,
             on_escape=self._on_escape,
+            on_hotkey_image=self._clipboard_image_hotkey,
         )
         self.watcher.enabled = not self.paused
         self.tray = None
@@ -245,6 +257,9 @@ class TranslatorApp:
             self.q.put(("hide_icon",))
 
     def _on_escape(self) -> None:
+        if self._shotting:
+            # 框选界面自己处理 Esc；这里再投递一次会把翻译面板一起关掉
+            return
         self.q.put(("escape",))
 
     def _panel_hit(self, x: int, y: int) -> bool:
@@ -252,6 +267,9 @@ class TranslatorApp:
         return self.result.fast_contains(x, y) and not self.result.click_through()
 
     def _should_ignore(self, x: int, y: int) -> bool:
+        if self._shotting:
+            # 框选期间整个屏幕都是我们的界面，别把拖拽当成划词
+            return True
         return (
             self.icon.fast_contains(x, y)
             or self._panel_hit(x, y)
@@ -261,9 +279,16 @@ class TranslatorApp:
 
     # ---------------- 翻译面板 ----------------
     def _ready_status(self) -> str:
+        if self._shot_hotkey:
+            shot = f"截图按 {self._shot_hotkey_label()}"
+        else:
+            shot = "截图快捷键不可用，请用托盘菜单"
         if self.mode == "auto":
-            return "就绪 · 自动识别 · 选中后点「译」或按 Ctrl+Alt+T"
-        return f"就绪 · 模式：{MODE_LABELS.get(self.mode, self.mode)} · 选中后点「译」或按 Ctrl+Alt+T"
+            return f"就绪 · 选中后按 Ctrl+Alt+T · {shot}"
+        return (
+            f"就绪 · {MODE_LABELS.get(self.mode, self.mode)} · "
+            f"Ctrl+Alt+T 划词 · {shot}"
+        )
 
     def _set_mode(self, mode: str) -> None:
         """切换工作模式（自动 / 英译中 / 中译英 / 长文摘要 / 术语解释）。"""
@@ -437,6 +462,15 @@ class TranslatorApp:
             menu = tk.Menu(self.root, tearoff=0)
             menu.add_command(label="模式…", command=lambda: self.q.put(("dock_mode_popup",)))
             menu.add_command(label="显示翻译面板", command=lambda: self.q.put(("show_window",)))
+            menu.add_separator()
+            menu.add_command(
+                label=f"截图翻译（{self._shot_hotkey_label()}）",
+                command=lambda: self.q.put(("shot",)),
+            )
+            menu.add_command(
+                label="翻译剪贴板图片", command=lambda: self.q.put(("clipboard_image",))
+            )
+            menu.add_separator()
             menu.add_checkbutton(
                 label="显示看板娘", variable=self._mascot_var, command=self._toggle_mascot
             )
@@ -530,6 +564,13 @@ class TranslatorApp:
             self._show_dock_menu()
         elif kind == "set_mode":
             self._set_mode(item[1])
+        elif kind == "shot":
+            self._open_shot()
+        elif kind == "image_ready":
+            self.translate_image(item[1], item[2])
+        elif kind == "clipboard_image":
+            if not self._translate_clipboard_image():
+                self.result.set_status("剪贴板里没有图片")
         elif kind == "escape":
             self.mode_popup.close()
             self.icon.hide()
@@ -568,6 +609,101 @@ class TranslatorApp:
         if has_cjk(text):
             return "zh2en"
         return "translate"
+
+    # ---------------- 截图 / 图片翻译 ----------------
+    def _shot_hotkey_label(self) -> str:
+        return (self._shot_hotkey or self.cfg.get("hotkey_shot", "ctrl+alt+d")).upper()
+
+    def _request_shot(self) -> None:
+        """热键线程进来：只投递事件，绝不能在这里碰 Tk。"""
+        self.q.put(("shot",))
+
+    def _open_shot(self) -> None:
+        """全屏框选（在 Tk 主线程里跑一个局部事件循环，不阻塞后台线程）。"""
+        if self._shotting:
+            return
+        if self.busy:
+            log.info("上一次请求还没处理完，忽略截图热键")
+            return
+        self._shotting = True
+        img = None
+        try:
+            self.icon.hide()
+            self.mode_popup.close()
+            img = RegionSelector(self.root).select()
+        except Exception:
+            log.exception("框选截图失败")
+        finally:
+            self._shotting = False
+        if img is None:
+            log.info("已取消框选（Esc / 右键 / 区域过小）")
+            return
+        self.translate_image(img, f"截图 {img.width}×{img.height}")
+
+    def _translate_clipboard_image(self) -> bool:
+        """剪贴板里是图片就翻图片（配合 Win+Shift+S）。返回 True 表示已接管。"""
+        img = grab_clipboard_image()
+        if img is None:
+            return False
+        self.translate_image(img, f"剪贴板图片 {img.width}×{img.height}")
+        return True
+
+    def _clipboard_image_hotkey(self) -> bool:
+        """pynput 后台线程调用：不能碰 Tk，所以只读图 + 投递事件。
+
+        判断要放在模拟 Ctrl+C 之前，否则那张图先被文本覆盖掉，就永远读不到了。
+        """
+        if self._shotting or self.busy:
+            return False
+        try:
+            img = grab_clipboard_image()
+        except Exception:
+            log.exception("读取剪贴板图片失败")
+            return False
+        if img is None:
+            return False
+        self.q.put(("image_ready", img, f"剪贴板图片 {img.width}×{img.height}"))
+        return True
+
+    def translate_image(self, img, origin: str) -> None:
+        """把一张 PIL 图送去视觉引擎翻译。"""
+        if self.busy or img is None:
+            return
+        mode = IMAGE_MODE_ALIAS.get(self.mode, self.mode)
+        if mode not in ("translate", "summary", "term"):
+            mode = "translate"
+        self.busy = True
+        self.pending = ("", 0, 0)
+        if self.vision.available():
+            status = "正在识别图片（纯 CPU，约 10~30 秒）…"
+        else:
+            status = "缺少视觉模型，见下方提示"
+        self.result.open(0, 0, origin, status)
+        log.info("开始图片翻译：%s，模式 %s", origin, mode)
+        threading.Thread(
+            target=self._worker_image, args=(img, mode), daemon=True
+        ).start()
+
+    def _worker_image(self, img, mode: str) -> None:
+        on_token = lambda piece: self.q.put(("token", piece))  # noqa: E731
+        on_status = lambda status: self.q.put(("status", status))  # noqa: E731
+        try:
+            result = self.vision.translate_image(
+                img, mode=mode, on_token=on_token, on_status=on_status
+            )
+            if result.text:
+                self.q.put(("done", result, "image"))
+            else:
+                self.q.put((
+                    "error",
+                    "没有从图片里读出内容。可能是图片太模糊、太小，或者框选的区域里没有文字。",
+                ))
+        except EngineError as exc:
+            log.error("图片翻译失败: %s", exc)
+            self.q.put(("error", str(exc)))
+        except Exception as exc:  # noqa: BLE001
+            log.exception("图片翻译异常")
+            self.q.put(("error", f"图片翻译失败：{exc}"))
 
     def translate_pending(self) -> None:
         text, x, y = self.pending
@@ -664,6 +800,13 @@ class TranslatorApp:
         ]
         menu = pystray.Menu(
             pystray.MenuItem("显示翻译窗口", lambda: self.q.put(("show_window",)), default=True),
+            pystray.MenuItem(
+                f"截图翻译（{self._shot_hotkey_label()}）", lambda: self.q.put(("shot",))
+            ),
+            pystray.MenuItem(
+                "翻译剪贴板图片", lambda: self.q.put(("clipboard_image",))
+            ),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("模式", pystray.Menu(*mode_items)),
             pystray.MenuItem(
                 "暂停划词", self._toggle_pause, checked=lambda _item: self.paused
@@ -685,7 +828,8 @@ class TranslatorApp:
     def _startup_notify(self) -> None:
         try:
             self.tray.notify(
-                "已启动：选中英文后点「译」小图标；或选中后按 Ctrl+Alt+T 直接翻译。",
+                f"已启动：选中文字按 Ctrl+Alt+T 翻译；"
+                f"按 {self._shot_hotkey_label()} 框选截图翻译（支持公式和扫描件）。",
                 "英译中助手",
             )
         except Exception:
@@ -721,6 +865,27 @@ class TranslatorApp:
             self._tray_title("英译中助手 · 引擎重启失败")
 
     # ---------------- 生命周期 ----------------
+    def start_hotkeys(self) -> str:
+        """注册截图热键。被别的程序占用时自动顺延到备用键，并把最终生效的键记下来。"""
+        spec = str(self.cfg.get("hotkey_shot") or "ctrl+alt+d").strip().lower()
+        fallbacks = [
+            str(k).strip().lower()
+            for k in (self.cfg.get("hotkey_shot_fallbacks") or [])
+            if str(k).strip()
+        ]
+        self._hotkeys.add(spec, self._request_shot, fallbacks)
+        try:
+            chosen = self._hotkeys.start().get(spec)
+        except Exception:
+            log.exception("注册截图热键失败")
+            chosen = None
+        self._shot_hotkey = chosen or ""
+        if chosen:
+            log.info("截图热键已就绪: %s", chosen.upper())
+        else:
+            log.error("截图热键注册失败（%s 及其备用键都被占用），只能用托盘菜单", spec)
+        return self._shot_hotkey
+
     def warmup(self) -> None:
         """提前把模型载入显存，避免第一次翻译等待。"""
         def run() -> None:
@@ -731,6 +896,7 @@ class TranslatorApp:
 
     def run(self) -> None:
         self.watcher.start()
+        self.start_hotkeys()        # 先注册热键：托盘/右键菜单的标签要用最终生效的键
         self.root.after(50, self._drain)
         self.start_tray()
         self._show_window(first=True)  # 启动即显示一个空的翻译面板（固定右侧）
@@ -826,18 +992,20 @@ class TranslatorApp:
         # 2) 兜底看门狗：5 秒内没退干净就强制结束本进程
         try:
             def _force_exit() -> None:
-                try:
-                    if self.translator.proc is not None:
-                        self.translator.proc.kill()
-                except Exception:
-                    pass
+                for proc_owner in (self.translator, self.vision):
+                    try:
+                        if proc_owner.proc is not None:
+                            proc_owner.proc.kill()
+                    except Exception:
+                        pass
                 os._exit(0)
 
             threading.Timer(5.0, _force_exit).start()
         except Exception:
             pass
         # 3) 正常清理
-        for fn in (self.watcher.stop, self.translator.stop):
+        for fn in (self.watcher.stop, self._hotkeys.stop,
+                   self.vision.stop, self.translator.stop):
             try:
                 fn()
             except Exception:
@@ -879,6 +1047,36 @@ def cmd_test(text: str, cfg: dict) -> int:
         translator.stop()
 
 
+def cmd_test_image(path: str, cfg: dict) -> int:
+    """命令行验证图片翻译：不启动界面，直接跑一次视觉引擎。"""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    from PIL import Image
+
+    vision = VisionTranslator(cfg)
+    if not vision.available():
+        print(vision.hint(), file=sys.stderr)
+        return 2
+    try:
+        img = Image.open(path)
+        img.load()
+        print(f"图片: {path}  {img.width}×{img.height}", file=sys.stderr)
+        result = vision.translate_image(img, on_status=lambda s: print(f"  {s}", file=sys.stderr))
+        print(result.text)
+        print(f"\n[{result.seconds:.1f}s, {result.tokens} tokens]", file=sys.stderr)
+        return 0
+    except EngineError as exc:
+        print(f"引擎错误: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"失败: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        vision.stop()
+
+
 def cmd_warmup(cfg: dict) -> int:
     translator = Translator(cfg)
     try:
@@ -895,15 +1093,20 @@ def cmd_warmup(cfg: dict) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="英译中划词翻译助手（纯本地，无 API）")
     parser.add_argument("--test", metavar="TEXT", help="命令行翻译一段文本后退出")
+    parser.add_argument(
+        "--test-image", metavar="PATH", help="命令行翻译一张图片后退出（验证视觉引擎）"
+    )
     parser.add_argument("--warmup", action="store_true", help="只启动引擎做预热后退出")
     parser.add_argument("--debug", action="store_true", help="输出调试日志到控制台")
     args = parser.parse_args(argv)
 
     cfg = config.load_config()
-    setup_logging(debug=args.debug or bool(args.test))
+    setup_logging(debug=args.debug or bool(args.test) or bool(args.test_image))
 
     if args.test:
         return cmd_test(args.test, cfg)
+    if args.test_image:
+        return cmd_test_image(args.test_image, cfg)
     if args.warmup:
         return cmd_warmup(cfg)
 

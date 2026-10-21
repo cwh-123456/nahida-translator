@@ -4,10 +4,15 @@
 产物：
   runtime/llama/llama-server.exe    llama.cpp 推理引擎（CUDA 13.4 版，含运行库 dll）
   models/*.gguf                     Qwen2.5-7B-Instruct Q4_K_M 量化模型（约 4.5GB）
+  models/vision/*.gguf              视觉模型 + 视觉投影层（约 3.2GB，用于截图/扫描件翻译）
+
+用法：
+  python tools/download.py              全部下载（文字 + 图片）
+  python tools/download.py --no-vision  只下文字模型，跳过 3.2GB 视觉模型
 
 · 支持断点续传：中断后重跑会从断点继续
 · GitHub 走 gh-proxy 镜像加速，模型走 ModelScope
-· 4 个文件并行下载，速度更快
+· 多个文件并行下载，速度更快
 """
 from __future__ import annotations
 
@@ -27,6 +32,8 @@ LLAMA_DIR = os.path.join(RUNTIME, "llama")
 MODELS = os.path.join(ROOT, "models")
 TAG = "b11718"
 MODEL_REPO = "Qwen/Qwen2.5-7B-Instruct-GGUF"
+VISION_REPO = "Qwen/Qwen3-VL-4B-Instruct-GGUF"
+VISION_DIR = os.path.join(MODELS, "vision")
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) translator-setup/1.0"}
 GH_MIRRORS = ["https://gh-proxy.com/", "https://ghfast.top/", ""]
 _print_lock = threading.Lock()
@@ -106,8 +113,9 @@ def gh(rel: str) -> list[str]:
     return [m + "https://" + raw for m in GH_MIRRORS]
 
 
-def model_files() -> list[tuple[str, list[str], int | None]]:
-    api = f"https://modelscope.cn/api/v1/models/{MODEL_REPO}/repo/files?Revision=master"
+def repo_sizes(repo: str) -> dict[str, int]:
+    """向 ModelScope 要一份文件名→字节数，用于断点续传的完整性校验。"""
+    api = f"https://modelscope.cn/api/v1/models/{repo}/repo/files?Revision=master"
     sizes: dict[str, int] = {}
     try:
         req = urllib.request.Request(api, headers=UA)
@@ -116,7 +124,12 @@ def model_files() -> list[tuple[str, list[str], int | None]]:
         for f in data.get("Data", {}).get("Files", []):
             sizes[f["Name"]] = int(f.get("Size") or 0)
     except Exception as exc:  # noqa: BLE001
-        log(f"[提示] 获取模型清单失败，跳过大小校验: {exc}")
+        log(f"[提示] 获取 {repo} 清单失败，跳过大小校验: {exc}")
+    return sizes
+
+
+def model_files() -> list[tuple[str, list[str], int | None]]:
+    sizes = repo_sizes(MODEL_REPO)
     base = f"modelscope.cn/models/{MODEL_REPO}/resolve/master"
     out = []
     for name in (
@@ -124,6 +137,24 @@ def model_files() -> list[tuple[str, list[str], int | None]]:
         "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf",
     ):
         out.append((name, ["https://" + base + "/" + name], sizes.get(name) or None))
+    return out
+
+
+def vision_files() -> list[tuple[str, list[str], str, int | None]]:
+    """图片翻译用的视觉模型：主模型 + 视觉投影层（mmproj），两个缺一不可。"""
+    sizes = repo_sizes(VISION_REPO)
+    base = f"modelscope.cn/models/{VISION_REPO}/resolve/master"
+    out = []
+    for name in (
+        "Qwen3VL-4B-Instruct-Q4_K_M.gguf",
+        "mmproj-Qwen3VL-4B-Instruct-F16.gguf",
+    ):
+        out.append((
+            name,
+            ["https://" + base + "/" + name],
+            os.path.join(VISION_DIR, name),
+            sizes.get(name) or None,
+        ))
     return out
 
 
@@ -168,6 +199,11 @@ def main() -> None:
     ]
     for name, urls, size in model_files():
         tasks.append((name, urls, os.path.join(MODELS, name), size))
+    # 视觉模型约 3.2GB，只用于截图/扫描件翻译。不想用图片功能可以加 --no-vision 跳过。
+    if "--no-vision" not in sys.argv:
+        tasks += vision_files()
+    else:
+        print("[跳过] 视觉模型（--no-vision）：截图翻译将不可用")
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(download, urls, dest, size) for _n, urls, dest, size in tasks]
@@ -188,6 +224,18 @@ def main() -> None:
             raise SystemExit(f"模型文件损坏: {part1}")
     total = sum(os.path.getsize(p) for p in walk_ext(MODELS, ".gguf"))
     print(f"[校验通过] 模型合计 {human(total)}")
+
+    if "--no-vision" not in sys.argv:
+        for name in ("Qwen3VL-4B-Instruct-Q4_K_M.gguf", "mmproj-Qwen3VL-4B-Instruct-F16.gguf"):
+            path = os.path.join(VISION_DIR, name)
+            if not os.path.exists(path):
+                raise SystemExit(f"视觉模型缺失: {path}")
+            with open(path, "rb") as f:
+                if f.read(4) != b"GGUF":
+                    raise SystemExit(f"视觉模型损坏: {path}")
+        print("[校验通过] 视觉模型（截图翻译可用）")
+    else:
+        print("[提示] 未下载视觉模型：Ctrl+Alt+D 截图翻译会提示缺少模型")
 
     for z in (llama_zip, cudart_zip):
         try:

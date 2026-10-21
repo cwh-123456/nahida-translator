@@ -109,12 +109,14 @@ class SelectionWatcher:
     """监听鼠标拖选与全局快捷键，把选中的文本回调给上层。"""
 
     def __init__(self, on_selection, should_ignore=None, on_press=None, hotkey="",
-                 on_scroll=None, on_escape=None):
+                 on_scroll=None, on_escape=None, on_hotkey_image=None):
         self.on_selection = on_selection
         self.should_ignore = should_ignore or (lambda x, y: False)
         self.on_press = on_press
         self.on_scroll = on_scroll
         self.on_escape = on_escape
+        # 剪贴板里是图片时优先翻图（配合 Win+Shift+S）；返回 True 表示已接管
+        self.on_hotkey_image = on_hotkey_image
         self.hotkey = hotkey
         self.enabled = True
         self._press_pos = None
@@ -275,6 +277,14 @@ class SelectionWatcher:
     def _hotkey_work(self) -> None:
         if not self.enabled:
             return
+        # 剪贴板里是图片时先翻图：模拟 Ctrl+C 会覆盖掉这张图，
+        # 所以必须在抓文本之前判断（顺序错了就永远读不到图）。
+        if self.on_hotkey_image is not None:
+            try:
+                if self.on_hotkey_image():
+                    return
+            except Exception:
+                log.exception("剪贴板图片处理失败")
         if not self._busy.acquire(blocking=False):
             return
         try:

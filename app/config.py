@@ -67,7 +67,25 @@ DEFAULTS = {
         "panel_click_through": False,
         "panel_auto_passthrough": True,
     },
+    # 图片识别引擎：独立进程、纯 CPU（8G 显存放不下两套模型），按需启动、闲置自动退出
+    "vision": {
+        "exe": r"runtime\llama\llama-server.exe",
+        "model": r"models\vision\Qwen3VL-4B-Instruct-Q4_K_M.gguf",
+        "mmproj": r"models\vision\mmproj-Qwen3VL-4B-Instruct-F16.gguf",
+        "host": "127.0.0.1",
+        "port": 8378,
+        "context": 8192,
+        "gpu_layers": 0,
+        "threads": 0,
+        "startup_timeout": 120,
+        "idle_timeout": 600,
+        "max_image_side": 1600,
+        "min_image_tokens": 1024,
+    },
     "hotkey": "<ctrl>+<alt>+t",
+    # 截图翻译热键。用 RegisterHotKey 独占注册，被占用时自动顺延到后面的备用键
+    "hotkey_shot": "ctrl+alt+d",
+    "hotkey_shot_fallbacks": ["ctrl+alt+k", "ctrl+alt+q"],
     "mode": "auto",
     "pause": False,
     "autostart": False,
@@ -223,6 +241,12 @@ def load_config() -> dict:
             )
     cfg = _merge(DEFAULTS, data)
     if not os.path.exists(CONFIG_PATH):
+        save_config(cfg)
+    elif _sanitize(data) != _sanitize(cfg):
+        # 版本升级新增了配置项（例如 vision 段、hotkey_shot）：补进文件，
+        # 否则用户打开 config.json 根本看不到这些项，也就无从修改。
+        # _sanitize 只保留 DEFAULTS 里有的键，所以旧版遗留的废弃字段也会顺手清掉。
+        log.info("配置缺少新版本的默认项，已补充写回")
         save_config(cfg)
     return cfg
 

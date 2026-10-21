@@ -1,4 +1,7 @@
+# 全局钩子 / 托盘 / 剪贴板
 pynput>=1.7.6
 pystray>=0.19.5
 Pillow>=10.0.0
 pyperclip>=1.8.2
+# 译文里的公式排版（mathtext 是 matplotlib 自带的，不需要装 TeX）
+matplotlib>=3.7

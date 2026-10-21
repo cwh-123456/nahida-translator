@@ -1884,14 +1884,21 @@ class ResultWindow:
             #    所以优先按像素折算行数
             n = 0
             try:
-                ypx = int(self.text.count("1.0", "end-1c", "ypixels")[0])
+                # count 在窗口刚 deiconify、还没真正映射时可能返回 None，
+                # 直接取 [0] 会抛 TypeError 把整个 _fit 打断（面板高度就停在上一次）
+                ypx = self.text.count("1.0", "end-1c", "ypixels")
+                if isinstance(ypx, (tuple, list)):
+                    ypx = ypx[0] if ypx else 0
+                ypx = int(ypx or 0)
                 ls = tkfont.Font(font=self.text.cget("font")).metrics("linespace")
-                n = int(ypx / max(1, ls)) + 2
-            except (tk.TclError, IndexError, ValueError):
+                n = int(ypx / max(1, ls)) + 2 if ypx > 0 else 0
+            except (tk.TclError, IndexError, ValueError, TypeError):
                 n = 0
             if n <= 0:
                 lines = self.text.count("1.0", "end-1c", "displaylines")
-                n = (int(lines[0]) if lines else 1) + 1
+                if isinstance(lines, (tuple, list)):
+                    lines = lines[0] if lines else 0
+                n = (int(lines or 1)) + 1
             n = max(3, min(n, 20))
             if int(self.text.cget("height")) != n:
                 self.text.configure(height=n)
