@@ -1030,6 +1030,40 @@ def set_click_through(win: tk.Toplevel, enable: bool) -> bool:
         return False
 
 
+def mouse_left_down() -> bool:
+    """左键此刻是不是真的按着（不依赖 Tk 有没有收到事件）。"""
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+    except Exception:
+        return True
+
+
+def sys_rect(win: tk.Toplevel) -> tuple[int, int, int, int] | None:
+    """窗口在系统里的真实矩形 (x, y, w, h)。
+
+    只读（GetWindowRect），不发任何窗口消息，不会重入 Tk 的事件回调，
+    所以在 Tk 主线程里随时可以调。Tk 自己的 winfo_x 反映的是"Tk 认为"
+    的位置，两者不一致时以系统为准——用户看到的就是系统这一份。
+    """
+    if win is None:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        hwnd = ctypes.windll.user32.GetAncestor(win.winfo_id(), 2)
+        if not hwnd:
+            return None
+        r = wintypes.RECT()
+        if not ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(r)):
+            return None
+        return (r.left, r.top, r.right - r.left, r.bottom - r.top)
+    except Exception:
+        return None
+
+
 def apply_round_rect_region(win: tk.Toplevel, w: int, h: int, radius: int = 16) -> bool:
     """把矩形窗口裁成圆角（任意宽高）。"""
     try:
@@ -1133,6 +1167,31 @@ class PanelBackground:
         # 就是"背景动图和面板不同步"（流式翻译时面板每 80ms 就可能长高一点）。
         if resized:
             self._render_now()
+
+    def force_geometry(self, x: int, y: int, w: int, h: int) -> None:
+        """无条件把窗口挪到 (x, y) 并改成 (w, h)。
+
+        和 sync() 的区别：sync() 认为"几何没变"就不动手，可一旦系统的真实
+        位置被别的什么东西挪走过，Tk 记的还是老坐标，两条记录对不上时
+        `geometry()` 会被 Tk 当成"没变化"直接跳过，窗口就永远卡错位。
+        这里先挪开一个像素再挪回来，逼 Tk 真发一次 SetWindowPos。
+        """
+        if self.win is None:
+            return
+        x, y = int(x), int(y)
+        w, h = max(int(w), 10), max(int(h), 10)
+        self._target = (w, h)
+        self._geom = (x, y, w, h)
+        if self._region != (w, h):
+            self._region = None
+        for gx, gy in ((x + 1, y + 1), (x, y)):
+            try:
+                self.win.geometry(f"{w}x{h}+{gx}+{gy}")
+                self.win.update_idletasks()
+            except tk.TclError:
+                return
+        self._apply_region()
+        self._render_now()
 
     def hide(self) -> None:
         self._cancel()
@@ -1281,6 +1340,7 @@ class ResultWindow:
         self._body_rect: tuple[int, int, int, int] | None = None
         self._resize_origin = None
         self._resize_dir = None
+        self._drag_active = False
         self._resize_strips: dict[str, tk.Frame] = {}
         self.scroll: tk.Scrollbar | None = None
         self._scroll_shown = False
@@ -1293,6 +1353,7 @@ class ResultWindow:
         self._syncing_bg = False
         self._bg_geom: tuple[int, int, int, int] | None = None
         self._order_warned = 0.0
+        self._align_warned = 0.0
         self._topmost_job = None
         self._verify_jobs: list = []
         # 公式混排：图片对象必须留引用，否则被 GC 后控件里会变成空白
@@ -1721,6 +1782,53 @@ class ResultWindow:
         if now - self._order_warned > 5.0:      # 每 5 秒最多记一条，避免刷屏
             self._order_warned = now
             log.warning("背景层翻到了面板上面（面板会被完全盖住），已重新压回下面")
+        return True
+
+    def keep_bg_aligned(self) -> bool:
+        """检查并修复：背景层的**真实**矩形必须和面板一致。返回是否修过。
+
+        为什么要用系统矩形而不是 Tk 的记录：正常路径（open/sync/拖动）都会
+        同时写两边的 geometry，Tk 认为它们一直是对齐的。可一旦某一次
+        SetWindowPos 没落到背景窗口上（穿透、窗口被别的程序挪动、Tk 认为
+        "几何没变"而跳过），Tk 的记录就和屏幕上的位置分了叉，之后所有
+        `sync()` 都被"几何没变"挡掉，错位会一直留到面板尺寸再变一次为止。
+        用户看到的就是"面板跑了、动图留在原地"。
+
+        这里只读两次 GetWindowRect（不发窗口消息、不重入 Tk），发现不一致
+        就用 force_geometry 逼 Tk 真挪一次。
+        """
+        if not self._shown or self.bg is None or self.bg.win is None or self.win is None:
+            return False
+        try:
+            if not (self.win.winfo_ismapped() and self.bg.win.winfo_ismapped()):
+                return False
+        except tk.TclError:
+            return False
+        rp = sys_rect(self.win)
+        rb = sys_rect(self.bg.win)
+        if rp is None or rb is None:
+            return False
+        if rp == rb:
+            return False
+        now = time.time()
+        if now - self._align_warned > 5.0:
+            self._align_warned = now
+            log.warning(
+                "背景层与面板错位：面板 %s，背景 %s（Δ=%s），已重新对齐",
+                rp, rb, (rp[0] - rb[0], rp[1] - rb[1], rp[2] - rb[2], rp[3] - rb[3]),
+            )
+        try:
+            w, h = self.win.winfo_width(), self.win.winfo_height()
+            x, y = self.win.winfo_x(), self.win.winfo_y()
+        except tk.TclError:
+            return False
+        if w <= 4 or h <= 4:
+            return False
+        # 面板自己的 Tk 坐标就是屏幕上真实那份（用户看到的面板就在那儿），
+        # 所以直接把背景写成面板的 Tk 几何；两个窗口在同一套坐标空间里，
+        # 不需要在这里处理 DPI 缩放。
+        self.bg.force_geometry(x, y, w, h)
+        self._bg_geom = (x, y, w, h)
         return True
 
     def wake(self) -> None:
@@ -2326,6 +2434,7 @@ class ResultWindow:
         self._resize_origin = None
         if self.bg is not None:
             self.bg.resume()
+        self.keep_bg_aligned()
         if self.on_close:
             try:
                 self.on_close()  # 保存尺寸/位置
@@ -2364,12 +2473,19 @@ class ResultWindow:
     def _drag_start(self, event):
         self._drag_dx = event.x_root - self.win.winfo_x()
         self._drag_dy = event.y_root - self.win.winfo_y()
+        self._drag_active = True
         # 拖动时先停掉动图刷新：每帧都要做一次 PIL 缩放裁切，会拖慢主线程，
         # 表现出来就是"背景比面板慢半拍"。
         if self.bg is not None:
             self.bg.pause()
 
     def _drag_move(self, event):
+        # 没有对应的"按下"就不动。面板穿透时按下会被下面的程序吃掉，等
+        # 悬停唤醒让面板重新可交互时，手上这一串移动事件才落到标题带上——
+        # 此时 _drag_dx/_drag_dy 还是上一次拖动的残值，照着算会把面板
+        # 一把甩到离光标很远的地方（用户描述为"面板自己跳走了"）。
+        if not getattr(self, "_drag_active", False):
+            return
         if self.win is None:
             return
         x = event.x_root - getattr(self, "_drag_dx", 0)
@@ -2381,11 +2497,23 @@ class ResultWindow:
         # 可能还没生效，读 winfo 会拿到上一帧的宽高
         self._sync_bg_at(x, y, self._geom_cache[2], self._geom_cache[3])
 
+    def release_stale_drag(self) -> None:
+        """左键已经松开、但松开事件没落到面板上（在窗口外松手）时清掉拖动状态。
+
+        不清的话 _drag_active 会一直挂着，下一次单纯的移动就会变成"幽灵拖动"，
+        把面板甩到光标那里去。
+        """
+        if getattr(self, "_drag_active", False) and not mouse_left_down():
+            self._drag_active = False
+
     def _drag_end(self, _event=None):
         """拖动结束：记住位置，下次点「译」直接回到这里。"""
         self._drag_dx = self._drag_dy = 0
+        self._drag_active = False
         if self.bg is not None:
             self.bg.resume()
+        # 松手时也核一次：拖动过程中若有一次背景没跟上，这里立刻补回来
+        self.keep_bg_aligned()
         if self.on_close:
             try:
                 self.on_close()

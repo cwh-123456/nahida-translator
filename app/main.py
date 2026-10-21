@@ -1077,6 +1077,13 @@ class TranslatorApp:
                 # 面板还在，但背景层翻到它上面去了。背景层是不透明的，
                 # 表现出来跟"面板关了"一模一样，用户只会看到一块动图。
                 self.result.keep_bg_below()
+            # 另一个兜底不变量：背景层的真实矩形必须贴着面板。拖动时若某一次
+            # SetWindowPos 没落到背景窗口上，Tk 的记录会和屏幕分叉，此后所有
+            # sync() 都被"几何没变"挡掉，错位就永久留在那儿（"面板跑了、动图
+            # 留在原地"）。这里用系统矩形核对，不一致就强制挪回去。
+            if self.result.visible():
+                self.result.keep_bg_aligned()
+                self.result.release_stale_drag()
             # 浮层开着时刷新模式按钮矩形：面板被拖动后仍能正确判断"点在按钮上"
             if self.mode_popup.visible() and self.result.visible():
                 self._mode_btn_rect = self._widget_rect(self.result.mode_label)
