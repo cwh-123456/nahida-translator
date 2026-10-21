@@ -1817,15 +1817,22 @@ class ResultWindow:
 
         from PIL import Image, ImageTk
 
+        # 行内公式绝不拆行：像 \dfrac{\eta}{1-\beta} 这种很高的式子，
+        # 拆走会让「……变为」和「，收敛更快」被硬生生分开。
+        # 宁可等比缩小，也要留在句子里。
+        if not display and img.height > linespace * 2.0:
+            ratio = (linespace * 2.0) / float(img.height)
+            img = img.resize((max(1, int(img.width * ratio)),
+                              max(1, int(img.height * ratio))), Image.LANCZOS)
+
         if img.width > max_w:
             ratio = max_w / float(img.width)
             img = img.resize((max_w, max(1, int(img.height * ratio))), Image.LANCZOS)
         photo = ImageTk.PhotoImage(img, master=self.text)
         self._math_photos.append(photo)
 
-        # 独立公式、或比一行还高的公式，必须独占一行：
-        # 硬塞在文字中间会把行高撑开，整段排版立刻松掉
-        block = display or img.height > linespace * 1.45
+        # 只有独立公式独占一行
+        block = display
         if block:
             at_start = self.text.index("end-1c") == "1.0"
             if not at_start and self.text.get("end-2c", "end-1c") != "\n":

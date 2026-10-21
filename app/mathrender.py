@@ -38,22 +38,40 @@ _WS = re.compile(r"\s+")
 # 至少带一个 LaTeX 命令、上标、下标、花括号或等号
 _MATHISH = re.compile(r"[\\^_{}=]")
 
-_CACHE: dict[tuple[str, int, str, int], object] = {}
+_CACHE: dict[tuple, object] = {}
 _CACHE_LOCK = threading.Lock()
 _CACHE_LIMIT = 240
+
+# 超采样倍数：按 3 倍分辨率渲染再降采样，边缘比 1 倍清楚得多，
+# 这也是「看起来像正规 PDF」的关键一步（1 倍时根号、Σ 的斜边会发毛）
+SUPERSAMPLE = 3
+
+# 字体风格：stix = Times 风格（学术 PDF 最常见），cm = LaTeX 默认
+FONT_SET = "stix"
 
 _RC_READY = False
 
 
+def set_font_set(name: str) -> None:
+    """切换公式字体风格：stix / cm / dejavuserif / stixsans。"""
+    global FONT_SET, _RC_READY
+    name = (name or "stix").strip().lower()
+    if name == FONT_SET:
+        return
+    FONT_SET = name
+    _RC_READY = False
+    _ensure_rc()
+
+
 def _ensure_rc() -> None:
-    """mathtext 的字体风格只需要设一次；Computer Modern 最接近论文观感。"""
+    """mathtext 的字体风格设一次就够：换风格时先置 _RC_READY=False 再进来。"""
     global _RC_READY
     if _RC_READY:
         return
     import matplotlib
 
     matplotlib.use("Agg", force=False)
-    matplotlib.rcParams["mathtext.fontset"] = "cm"
+    matplotlib.rcParams["mathtext.fontset"] = FONT_SET
     matplotlib.rcParams["axes.unicode_minus"] = False
     _RC_READY = True
 
@@ -124,7 +142,7 @@ def render_image(tex: str, px: int = 16, color: str = "#f1f8e8",
     clean = _normalize(tex)
     if not clean:
         return None
-    key = (clean, int(px), color, int(dpi))
+    key = (clean, int(px), color, int(dpi), FONT_SET)
     with _CACHE_LOCK:
         hit = _CACHE.get(key)
     if hit is not None:
@@ -139,6 +157,7 @@ def render_image(tex: str, px: int = 16, color: str = "#f1f8e8",
         log.warning("公式渲染不可用: %s", exc)
         return None
 
+    render_dpi = float(dpi) * SUPERSAMPLE
     try:
         # 用严格解析器（math_to_image）：解析失败会抛异常，不会静默画成源码。
         # 一律用黑色画在白底上，再把亮度反相当透明度——math_to_image 存出来的
@@ -148,7 +167,7 @@ def render_image(tex: str, px: int = 16, color: str = "#f1f8e8",
         depth = math_to_image(
             f"${clean}$", buf,
             prop=FontProperties(size=px * 72.0 / dpi),
-            dpi=dpi, format="png", color="black",
+            dpi=render_dpi, format="png", color="black",
         )
         buf.seek(0)
         mask = Image.open(buf).convert("L")
@@ -167,15 +186,25 @@ def render_image(tex: str, px: int = 16, color: str = "#f1f8e8",
         return None
 
     # 补底部空白：align="baseline" 把图片底边贴在基线上，
-    # 不补的话带下标/分式的公式会被整体抬高一截
+    # 不补的话带下标/分式的公式会被整体抬高一截。
+    # depth 是「磅」，要按实际渲染 dpi 换成像素（上次漏了这步换算，
+    # 公式比正文高 1~4px，看起来就是"飘在上面"）。
     try:
-        pad = int(round(float(depth)))
+        pad = int(round(float(depth) * render_dpi / 72.0))
         if pad > 0:
             out = Image.new("RGBA", (img.width, img.height + pad), (0, 0, 0, 0))
             out.paste(img, (0, 0))
             img = out
     except Exception:
         pass
+
+    # 3 倍渲染后降采样回目标像素：边缘更干净，Σ、根号、分式线不发毛
+    if SUPERSAMPLE > 1:
+        img = img.resize(
+            (max(1, round(img.width / SUPERSAMPLE)),
+             max(1, round(img.height / SUPERSAMPLE))),
+            Image.LANCZOS,
+        )
 
     with _CACHE_LOCK:
         if len(_CACHE) < _CACHE_LIMIT:
