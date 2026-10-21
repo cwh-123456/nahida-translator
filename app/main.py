@@ -198,6 +198,7 @@ class TranslatorApp:
             on_scroll=self._on_scroll,
             on_escape=self._on_escape,
             on_hotkey_image=self._clipboard_image_hotkey,
+            on_single_click=self._on_panel_click,
         )
         self.watcher.enabled = not self.paused
         self.tray = None
@@ -261,6 +262,34 @@ class TranslatorApp:
             # 框选界面自己处理 Esc；这里再投递一次会把翻译面板一起关掉
             return
         self.q.put(("escape",))
+
+    def _on_panel_click(self, x: int, y: int) -> None:
+        """单击落在面板上（钩子线程）：面板正在穿透的话，交给主线程判断要不要唤醒。
+
+        为什么只在"单击"时做：拖选的按下也会经过钩子，如果按一下就唤醒，
+        用户想选面板底下的文字时会被面板抢走整个拖拽。单击（几乎没位移）
+        则是明确的"我要操作面板"——点叉号、点模式按钮、点复制。
+
+        这里只做纯算数判断（钩子线程不能碰 Tk），落点到底在正文区还是标题带，
+        交给主线程用控件几何去量。
+        """
+        if self.result.fast_visible() and self.result.click_through() \
+                and self.result.fast_contains(x, y):
+            self.q.put(("panel_click", x, y))
+
+    def _apply_panel_click(self, x: int, y: int) -> None:
+        """主线程：决定这一下点击要不要把面板从穿透状态唤醒。
+
+        落在正文区就保持穿透——那是"我要选面板底下的字"，唤醒了反而挡住；
+        落在标题带、按钮、边角上则是"我要操作面板"，唤醒并把层级摆正。
+        """
+        if not (self.result.visible() and self.result.click_through()):
+            return
+        if not self.result.fast_contains(x, y):
+            return
+        if self.result.click_in_body(x, y):
+            return
+        self.result.wake()
 
     def _panel_hit(self, x: int, y: int) -> bool:
         """面板是否在这个坐标上“真的挡住”鼠标（穿透状态下不算）。"""
@@ -544,6 +573,8 @@ class TranslatorApp:
             self.translate_pending()
         elif kind in ("outside_click", "hide_icon"):
             self.icon.hide()
+        elif kind == "panel_click":
+            self._apply_panel_click(item[1], item[2])
         elif kind == "show_window":
             self._show_window()
         elif kind == "dock_click":
@@ -945,6 +976,10 @@ class TranslatorApp:
                 if bg is not None and bg.win is not None and bg.win.winfo_ismapped():
                     bg.hide()
                     log.warning("面板不可见但背景层仍在显示，已强制隐藏")
+            elif self.result.bg_order_broken():
+                # 面板还在，但背景层翻到它上面去了。背景层是不透明的，
+                # 表现出来跟"面板关了"一模一样，用户只会看到一块动图。
+                self.result.keep_bg_below()
             # 浮层开着时刷新模式按钮矩形：面板被拖动后仍能正确判断"点在按钮上"
             if self.mode_popup.visible() and self.result.visible():
                 self._mode_btn_rect = self._widget_rect(self.result.mode_label)

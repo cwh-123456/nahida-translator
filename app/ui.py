@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 
@@ -1252,6 +1253,7 @@ class ResultWindow:
         self._panel_alpha = self._alpha_from_cfg()
         self._syncing_bg = False
         self._bg_geom: tuple[int, int, int, int] | None = None
+        self._order_warned = 0.0
         self._topmost_job = None
         self._verify_jobs: list = []
         # 公式混排：图片对象必须留引用，否则被 GC 后控件里会变成空白
@@ -1338,6 +1340,9 @@ class ResultWindow:
         win = tk.Toplevel(self.root)
         win.withdraw()
         win.overrideredirect(True)
+        # 新窗口天生不带"穿透"样式，标志位必须跟着归零。否则重建窗口后
+        # _click_through 还是 True，apply_click_through(True) 会被当成重复设置直接返回
+        self._click_through = False
         # 翻译面板不做置顶：跟随系统窗口层级，被其他窗口盖住是正常行为
         if self.bg is not None:
             try:
@@ -1624,6 +1629,84 @@ class ResultWindow:
                 self.bg.win.lower(self.win)
         except tk.TclError:
             pass
+
+    # ---------- 两层窗口的层级不变量 ----------
+    # 面板和背景动图是两个各自独立的顶层窗口，它们在系统 z-order 里的先后
+    # 不是我们能长期控制的：任何一次点击/激活之后，系统都可能把这两层重新
+    # 排一遍。背景层是实心不透明的，一旦翻到面板上面，面板就被完整盖住——
+    # 用户看到的就是"面板没了，只剩一块动图"，哪怕面板本身还在、还是 mapped。
+    #
+    # 穿透状态下这个翻面是必现的：面板不接点击，点击落到下面的程序，系统把
+    # 那个程序插到最前面时顺手重排了我们这两层。所以不能只在"打开时排一次"，
+    # 得有个便宜的不变量检查，被破坏就压回去。
+    GW_HWNDPREV = 3      # 系统里的"更靠上的那个窗口"
+    _MAX_WALK = 600      # 走链的保护上限，防止异常数据下死循环
+
+    def bg_order_broken(self) -> bool:
+        """背景层是不是跑到面板上面去了。
+
+        只读：GetWindow 走 z-order 链，不发任何窗口消息，不重入 Tk。
+        不能用 GetWindow(面板, GW_HWNDPREV) == 背景层 直接判断——两层之间
+        常常夹着别的窗口（输入法、托盘、其它 Tk 辅助窗口），直接比会漏判。
+        """
+        if self.bg is None or self.bg.win is None or self.win is None:
+            return False
+        try:
+            import ctypes
+
+            if not (self.win.winfo_ismapped() and self.bg.win.winfo_ismapped()):
+                return False
+            u32 = ctypes.windll.user32
+            panel = u32.GetAncestor(self.win.winfo_id(), 2)
+            cur = u32.GetAncestor(self.bg.win.winfo_id(), 2)
+            if not (panel and cur):
+                return False
+            # 从背景层往"更靠上"的方向走：先遇到面板说明背景层在面板下面（正常）；
+            # 一直走到顶都没遇到，说明背景层压在面板上面。
+            for _ in range(self._MAX_WALK):
+                cur = u32.GetWindow(cur, self.GW_HWNDPREV)
+                if not cur:
+                    return True
+                if cur == panel:
+                    return False
+            return False
+        except Exception:
+            return False
+
+    def keep_bg_below(self) -> bool:
+        """检查并修复：背景层必须在面板下面。返回是否真的修过。"""
+        if not self.bg_order_broken():
+            return False
+        self._raise_with_bg()
+        now = time.time()
+        if now - self._order_warned > 5.0:      # 每 5 秒最多记一条，避免刷屏
+            self._order_warned = now
+            log.warning("背景层翻到了面板上面（面板会被完全盖住），已重新压回下面")
+        return True
+
+    def wake(self) -> None:
+        """用户点了面板（此时面板正处在穿透状态）：恢复可交互并把层级摆正。
+
+        穿透状态下那一下点击已经落到下面的程序了，救不回来；这里保证的是
+        "下一次点击一定打在面板上"，同时把面板从被盖住的状态里抬回来。
+        """
+        self._raise_self()
+        self.keep_bg_below()
+
+    def click_in_body(self, x: int, y: int) -> bool:
+        """这个屏幕坐标是不是落在正文区（而不是标题带 / 底栏 / 按钮）。
+
+        用来区分两种意图：点正文区的人多半是想选面板底下的文字（穿透的初衷），
+        点标题带和按钮的人是想操作面板（关掉、切模式、复制）。
+        """
+        if self.text is None:
+            return False
+        try:
+            x0, y0 = self.text.winfo_rootx(), self.text.winfo_rooty()
+            w, h = self.text.winfo_width(), self.text.winfo_height()
+        except tk.TclError:
+            return False
+        return x0 <= x <= x0 + w and y0 <= y <= y0 + h
 
     def _raise_self(self) -> None:
         """把面板拉到最前：lift 有时压不过前台窗口，短暂置顶再恢复。"""

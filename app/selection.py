@@ -109,10 +109,15 @@ class SelectionWatcher:
     """监听鼠标拖选与全局快捷键，把选中的文本回调给上层。"""
 
     def __init__(self, on_selection, should_ignore=None, on_press=None, hotkey="",
-                 on_scroll=None, on_escape=None, on_hotkey_image=None):
+                 on_scroll=None, on_escape=None, on_hotkey_image=None, on_single_click=None):
         self.on_selection = on_selection
         self.should_ignore = should_ignore or (lambda x, y: False)
         self.on_press = on_press
+        # 单击（按下→松开、几乎没有位移）的回调。和 on_press 分开是因为
+        # 拖选的按下也走 on_press，而"用户是想拖选下面的文字"和"用户是想点面板"
+        # 必须区分开，否则一拖就被面板抢走。
+        # 名字刻意不叫 on_click：下面有个同名方法 _on_click 是 pynput 的回调
+        self.on_single_click = on_single_click
         self.on_scroll = on_scroll
         self.on_escape = on_escape
         # 剪贴板里是图片时优先翻图（配合 Win+Shift+S）；返回 True 表示已接管
@@ -233,6 +238,14 @@ class SelectionWatcher:
 
         # 没怎么移动：可能是双击选词（双击/三击选中的文字没有拖动）
         if moved < 4:
+            # 真正的单击。面板处在穿透状态时，这一下已经穿到下面的程序了，
+            # 只能靠这个回调把面板唤醒，让用户的"下一次点击"打在面板上。
+            # 放在 should_ignore 之前：穿透面板按定义不算"工具窗口内"。
+            if self.on_single_click is not None:
+                try:
+                    self.on_single_click(px, py)
+                except Exception:
+                    pass
             if self.should_ignore(px, py):
                 return
             last_t, last_x, last_y = self._last_click
