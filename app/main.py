@@ -678,6 +678,9 @@ class TranslatorApp:
             status = "正在识别图片（纯 CPU，约 10~30 秒）…"
         else:
             status = "缺少视觉模型，见下方提示"
+        # 图片翻译走中性配色：不透明灰底，正式截图工具该有的样子，
+        # 也让公式与正文在纯色底上更好认
+        self.result.set_style("neutral")
         self.result.open(0, 0, origin, status)
         log.info("开始图片翻译：%s，模式 %s", origin, mode)
         threading.Thread(
@@ -716,6 +719,7 @@ class TranslatorApp:
         status = MODE_PENDING.get(mode, "正在翻译…")
         if not self.translator.ready:
             status = "正在加载本地模型（首次约 10 秒）…"
+        self.result.set_style("leaf")
         self.result.open(x + 4, y + 12, text, status)
         threading.Thread(target=self._worker, args=(text, mode), daemon=True).start()
 

@@ -27,6 +27,31 @@ ACCENT = "#9be26f"      # 草元素绿（高亮）
 ACCENT_DIM = "#5f9e4a"  # 深一档草绿
 GOLD = "#e9c97d"        # 金色点缀（微光/星点）
 
+# 两套配色。leaf 是纳西妲主题（默认）；neutral 是中性灰，专给截图/图片翻译用：
+# 截图面板的目的是读内容，半透明的绿色玻璃配上深色壁纸只会让正文更难认，
+# 所以那一类面板一律不透明、灰底白字，学 QQ 截图的干净观感。
+LEAF = {
+    "name": "leaf",
+    "bg": BG, "bg_soft": BG_SOFT, "border": BORDER,
+    "fg": FG, "muted": MUTED, "accent": ACCENT, "accent_dim": ACCENT_DIM,
+    "gold": GOLD, "rule": "#2b4a37", "select": "#335c45",
+    "header_top": (28, 62, 47), "header_bottom": (16, 31, 24),
+    "header_glow": (140, 230, 150, 34), "header_vein": (150, 220, 150, 26),
+    "header_rule": (95, 158, 74, 130), "spark": (233, 201, 125),
+    "gif": True,
+}
+NEUTRAL = {
+    "name": "neutral",
+    "bg": "#1e1e1e", "bg_soft": "#2f2f2f", "border": "#3d3d3d",
+    "fg": "#eaeaea", "muted": "#9a9a9a", "accent": "#4c9aff",
+    "accent_dim": "#2f6ea8", "gold": "#c8c8c8",
+    "rule": "#333333", "select": "#3a4a5e",
+    "header_top": (40, 40, 40), "header_bottom": (26, 26, 26),
+    "header_glow": (255, 255, 255, 10), "header_vein": (255, 255, 255, 8),
+    "header_rule": (72, 72, 72, 220), "spark": (200, 200, 200),
+    "gif": False,
+}
+
 
 def _clamp_pos(x: int, y: int, w: int, h: int, root: tk.Misc) -> tuple[int, int]:
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -159,15 +184,20 @@ MODE_TITLES = {
 }
 
 
-def render_header_band(width: int, height: int):
-    """标题带背景：深绿渐变 + 草绿光晕 + 细叶脉 + 金色星点（纳西妲风格）。"""
+def render_header_band(width: int, height: int, th: dict | None = None):
+    """标题带背景：深绿渐变 + 草绿光晕 + 细叶脉 + 金色星点（纳西妲风格）。
+
+    neutral 主题用的是同一套结构，只是颜色换成灰阶、光晕压到几乎看不见，
+    几何一次都不用改。
+    """
     from PIL import Image, ImageDraw, ImageFilter
 
+    th = th or LEAF
     w = max(int(width), 16)
     h = max(int(height), 16)
     base = Image.new("RGBA", (w, h))
     d = ImageDraw.Draw(base)
-    top, bottom = (28, 62, 47), (16, 31, 24)
+    top, bottom = th["header_top"], th["header_bottom"]
     for y in range(h):
         t = y / max(h - 1, 1)
         c = tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3))
@@ -175,34 +205,39 @@ def render_header_band(width: int, height: int):
 
     glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     gd = ImageDraw.Draw(glow)
-    gd.ellipse((-w * 0.25, -h * 1.2, w * 0.55, h * 1.5), fill=(140, 230, 150, 34))
+    gd.ellipse((-w * 0.25, -h * 1.2, w * 0.55, h * 1.5), fill=th["header_glow"])
     glow = glow.filter(ImageFilter.GaussianBlur(max(4, h // 5)))
     base = Image.alpha_composite(base, glow)
 
     veins = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     vd = ImageDraw.Draw(veins)
+    vein_rgb = th["header_vein"][:3]
     for i, (x0, span, alpha) in enumerate(
         ((w * 0.04, w * 0.55, 26), (w * 0.26, w * 0.48, 18), (w * 0.52, w * 0.42, 14))
     ):
         y0 = h * (0.18 + 0.20 * i)
         vd.arc((x0, y0 - h * 0.6, x0 + span, y0 + h * 1.1), start=200, end=340,
-               fill=(150, 220, 150, alpha), width=max(1, h // 24))
+               fill=vein_rgb + (alpha if th["name"] == "leaf" else alpha // 5),
+               width=max(1, h // 24))
     base = Image.alpha_composite(base, veins)
 
     spark = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     sd = ImageDraw.Draw(spark)
+    spark_rgb = th["spark"]
     for sx, sy, r, a in (
         (w * 0.70, h * 0.30, 3.2, 150),
         (w * 0.79, h * 0.62, 2.4, 105),
         (w * 0.61, h * 0.68, 1.8, 85),
         (w * 0.90, h * 0.38, 1.6, 75),
     ):
-        sd.line((sx - r, sy, sx + r, sy), fill=(233, 201, 125, a), width=1)
-        sd.line((sx, sy - r, sx, sy + r), fill=(233, 201, 125, a), width=1)
+        if th["name"] != "leaf":
+            a //= 6            # 中性主题不要星点抢视线，留一点肌理就够
+        sd.line((sx - r, sy, sx + r, sy), fill=spark_rgb + (a,), width=1)
+        sd.line((sx, sy - r, sx, sy + r), fill=spark_rgb + (a,), width=1)
     base = Image.alpha_composite(base, spark)
 
     d = ImageDraw.Draw(base)
-    d.line([(0, h - 1), (w, h - 1)], fill=(95, 158, 74, 130), width=1)
+    d.line([(0, h - 1), (w, h - 1)], fill=th["header_rule"], width=1)
     return base.convert("RGB")
 
 
@@ -213,7 +248,7 @@ class PillButton:
 
     def __init__(self, parent: tk.Misc, text: str, command, *, family: str,
                  pt_size: int, accent: bool = False, chevron: bool = False,
-                 close: bool = False, bg: str = BG):
+                 close: bool = False, bg: str = BG, th: dict | None = None):
         from PIL import ImageTk
 
         self.parent = parent
@@ -224,12 +259,13 @@ class PillButton:
         self.accent = accent
         self.chevron = chevron
         self.close = close
-        self.bg = bg
+        self.th = th or LEAF
+        self.bg = self.th["bg"]
         self._state = "normal"
         self._images: dict[str, object] = {}
 
         self.widget = tk.Label(parent, bd=0, highlightthickness=0, padx=0, pady=0,
-                               cursor="hand2", bg=bg)
+                               cursor="hand2", bg=self.bg)
         for state in ("normal", "hover", "pressed"):
             self._images[state] = ImageTk.PhotoImage(self._render(state))
         self.widget.configure(image=self._images["normal"])
@@ -240,6 +276,25 @@ class PillButton:
 
     # ---------- 绘制 ----------
     def _palette(self, state: str):
+        if self.th["name"] == "neutral":
+            if self.close:
+                return {
+                    "normal": ((0, 0, 0, 0), None, (154, 154, 154, 255)),
+                    "hover": ((62, 62, 62, 255), None, (255, 255, 255, 255)),
+                    "pressed": ((46, 46, 46, 255), None, (235, 235, 235, 255)),
+                }[state]
+            if self.accent:
+                return {
+                    "normal": ((46, 46, 46, 255), (76, 154, 255, 120), (234, 234, 234, 255)),
+                    "hover": ((60, 60, 60, 255), (76, 154, 255, 225), (255, 255, 255, 255)),
+                    "pressed": ((38, 38, 38, 255), (76, 154, 255, 160), (225, 235, 248, 255)),
+                }[state]
+            return {
+                "normal": ((48, 48, 48, 255), (74, 74, 74, 255), (236, 236, 236, 255)),
+                "hover": ((62, 62, 62, 255), (110, 110, 110, 255), (255, 255, 255, 255)),
+                "pressed": ((40, 40, 40, 255), (90, 90, 90, 255), (224, 224, 224, 255)),
+            }[state]
+
         if self.close:
             if state == "hover":
                 return (38, 67, 47, 255), None, (241, 248, 232, 255)
@@ -1151,13 +1206,16 @@ class ResultWindow:
     """译文卡片：标题、原文摘要、可选中复制的译文、耗时状态与操作按钮。"""
 
     def __init__(self, root: tk.Tk, cfg: dict, on_retry=None, on_copy=None,
-                 on_close=None, on_mode_click=None, bg_gif: str | None = None):
+                 on_close=None, on_mode_click=None, bg_gif: str | None = None,
+                 style: str = "leaf"):
         self.root = root
         self.cfg = cfg
         self.on_retry = on_retry
         self.on_copy = on_copy
         self.on_close = on_close
         self.on_mode_click = on_mode_click
+        self._style = style if style in ("leaf", "neutral") else "leaf"
+        self.th = NEUTRAL if self._style == "neutral" else LEAF
         self.win: tk.Toplevel | None = None
         self.text: tk.Text | None = None
         self.status: tk.Label | None = None
@@ -1180,9 +1238,11 @@ class ResultWindow:
         self.scroll: tk.Scrollbar | None = None
         self._scroll_shown = False
 
-        # 背景动画层：面板半透明，让底下的动图透出来
-        self.bg = PanelBackground(root, bg_gif) if bg_gif else None
-        self._panel_alpha = float(cfg["ui"].get("panel_alpha", 0.72)) if bg_gif else 1.0
+        # 背景动画层：面板半透明，让底下的动图透出来。
+        # 中性主题（截图/图片翻译）不要这一层：它只会把壁纸的绿透进正文里。
+        self._bg_gif_path = bg_gif
+        self.bg = PanelBackground(root, bg_gif) if (bg_gif and self.th["gif"]) else None
+        self._panel_alpha = self._alpha_from_cfg()
         self._syncing_bg = False
         self._bg_geom: tuple[int, int, int, int] | None = None
         self._topmost_job = None
@@ -1190,6 +1250,73 @@ class ResultWindow:
         # 公式混排：图片对象必须留引用，否则被 GC 后控件里会变成空白
         self._math_photos: list = []
         self._plain = ""          # 未经渲染的原文（含 LaTeX），复制时用它
+        self._region_applied = False
+
+    def _alpha_from_cfg(self) -> float:
+        if self.bg is None:
+            return 1.0
+        try:
+            return float(self.cfg["ui"].get("panel_alpha", 0.72))
+        except Exception:
+            return 0.72
+
+    def set_style(self, style: str) -> None:
+        """切换配色：leaf（纳西妲绿）/ neutral（中性灰，截图与图片翻译用）。
+
+        面板是长生命周期的单例，已经建好的控件不会认新颜色，所以换主题时
+        直接销毁窗口，下次 show 时按新主题重新 _build 一次。
+        """
+        style = style if style in ("leaf", "neutral") else "leaf"
+        if style == self._style:
+            return
+        self._style = style
+        self.th = NEUTRAL if style == "neutral" else LEAF
+        if self.bg is not None:
+            try:
+                self.bg.hide()
+                if self.bg.win is not None:
+                    self.bg.win.destroy()
+            except Exception:
+                pass
+            self.bg = None
+        if self.th["gif"] and self._bg_gif_path:
+            self.bg = PanelBackground(self.root, self._bg_gif_path)
+        self._panel_alpha =         self._alpha_from_cfg()
+        self._destroy_window()
+
+    def _destroy_window(self) -> None:
+        """销毁窗口和控件引用，让下一次 show 按当前主题重新构建。"""
+        for attr in ("_fit_job", "_header_job", "_topmost_job"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        self._cancel_verify()
+        if self.bg is not None:
+            try:
+                self.bg.hide()
+            except Exception:
+                pass
+        if self.win is not None:
+            try:
+                self.win.destroy()
+            except Exception:
+                pass
+        self.win = None
+        self.text = None
+        self.status = None
+        self.source_label = None
+        self.mode_label = None
+        self.header = None
+        self.scroll = None
+        self._scroll_shown = False
+        self._math_photos = []
+        self._resize_strips = {}
+        self._shown = False
+        self._region_applied = False
 
     # ---------- 构建 ----------
     def _build(self) -> None:
@@ -1211,9 +1338,9 @@ class ResultWindow:
         # 面板一旦 Unmap（任何路径隐藏，不只是 close()），立刻把背景收掉。
         win.bind("<Unmap>", self._on_panel_unmap, add="+")
         win.bind("<Map>", self._on_panel_map, add="+")
-        outer = tk.Frame(win, bg=BORDER)
+        outer = tk.Frame(win, bg=self.th["border"])
         outer.pack(fill="both", expand=True)
-        body = tk.Frame(outer, bg=BG)
+        body = tk.Frame(outer, bg=self.th["bg"])
         body.pack(fill="both", expand=True, padx=1, pady=1)
 
         # 标题带：自绘的深绿渐变 + 草绿光晕 + 叶脉 + 金色星点
@@ -1221,7 +1348,7 @@ class ResultWindow:
         self._header_job = None
         self._header_photo = None
         self._header_item = None
-        header = tk.Canvas(body, height=self.header_h, bg=BG,
+        header = tk.Canvas(body, height=self.header_h, bg=self.th["bg"],
                            highlightthickness=0, bd=0)
         header.pack(fill="x")
         header.bind("<Configure>", self._on_header_configure)
@@ -1233,7 +1360,7 @@ class ResultWindow:
         # 模式按钮：抗锯齿圆角按钮，点它弹出模式菜单
         self.mode_pill = PillButton(
             header, self._mode_text, self._on_mode_click, family=family,
-            pt_size=max(9, size - 1), accent=True, chevron=True,
+            pt_size=max(9, size - 1), accent=True, chevron=True, th=self.th,
         )
         self.mode_label = self.mode_pill.widget
         self._mode_item = header.create_window(
@@ -1243,7 +1370,7 @@ class ResultWindow:
         # 拖拽绑定不能绑到按钮上，否则会把点击回调覆盖掉）
         self.close_pill = PillButton(
             header, "", self.close, family=family,
-            pt_size=max(9, size - 1), close=True,
+            pt_size=max(9, size - 1), close=True, th=self.th,
         )
         self.close_btn = self.close_pill.widget
         self._close_item = header.create_window(
@@ -1252,24 +1379,24 @@ class ResultWindow:
 
         if ui.get("show_source", True):
             self.source_label = tk.Label(
-                body, text="", bg=BG, fg=MUTED, anchor="w", justify="left",
+                body, text="", bg=self.th["bg"], fg=self.th["muted"], anchor="w", justify="left",
                 font=(family, int(ui.get("source_font_size", 9))),
                 wraplength=self.width - 28,
             )
             self.source_label.pack(fill="x", padx=12, pady=(8, 6))
 
-        tk.Frame(body, bg="#2b4a37", height=1).pack(fill="x", padx=12)
+        tk.Frame(body, bg=self.th["rule"], height=1).pack(fill="x", padx=12)
 
-        wrap = tk.Frame(body, bg=BG)
+        wrap = tk.Frame(body, bg=self.th["bg"])
         wrap.pack(fill="both", expand=True, padx=6, pady=(2, 4))
         self.text = tk.Text(
-            wrap, bg=BG, fg=FG, bd=0, highlightthickness=0, wrap="word",
+            wrap, bg=self.th["bg"], fg=self.th["fg"], bd=0, highlightthickness=0, wrap="word",
             font=(family, size), padx=6, pady=6, height=3, cursor="arrow",
-            insertbackground=ACCENT, selectbackground="#335c45",
+            insertbackground=self.th["accent"], selectbackground=self.th["select"],
             spacing1=2, spacing2=2,
         )
         scroll = tk.Scrollbar(wrap, command=self.text.yview, width=8, bd=0,
-                              troughcolor=BG, bg=BORDER, activebackground=MUTED,
+                              troughcolor=self.th["bg"], bg=self.th["border"], activebackground=self.th["muted"],
                               relief="flat")
         self.scroll = scroll
         self._scroll_shown = True
@@ -1278,26 +1405,26 @@ class ResultWindow:
         self.text.pack(side="left", fill="both", expand=True)
         self.text.configure(state="disabled")
         # mathtext 渲染不了（矩阵、分段函数等）时，用这个样式把源码标出来
-        self.text.tag_configure("raw_math", foreground=GOLD,
+        self.text.tag_configure("raw_math", foreground=self.th["gold"],
                                 font=(family, max(9, size - 2)))
         self.text.bind("<Control-c>", self._copy_event)
         self.text.bind("<Button-1>", self._on_text_click)
 
-        footer = tk.Frame(body, bg=BG, height=40)
+        footer = tk.Frame(body, bg=self.th["bg"], height=40)
         footer.pack(fill="x", padx=12, pady=(2, 8))
         footer.pack_propagate(False)
         self.copy_pill = PillButton(
             footer, "复制", lambda: self._copy_all(), family=family,
-            pt_size=max(9, size - 3),
+            pt_size=max(9, size - 3), th=self.th,
         )
         self.copy_pill.widget.pack(side="right", padx=(8, 0))
         self.retry_pill = PillButton(
             footer, "重译", lambda: self.on_retry and self.on_retry(), family=family,
-            pt_size=max(9, size - 3),
+            pt_size=max(9, size - 3), th=self.th,
         )
         self.retry_pill.widget.pack(side="right", padx=(8, 0))
         self.status = tk.Label(
-            footer, text="", bg=BG, fg=MUTED,
+            footer, text="", bg=self.th["bg"], fg=self.th["muted"],
             font=(family, max(8, size - 3)), anchor="w",
         )
         self.status.pack(side="left", fill="x", expand=True)
@@ -1544,7 +1671,7 @@ class ResultWindow:
         try:
             from PIL import ImageTk
 
-            photo = ImageTk.PhotoImage(render_header_band(width, self.header_h))
+            photo = ImageTk.PhotoImage(render_header_band(width, self.header_h, self.th))
             self._header_photo = photo
             if self._header_item is None:
                 self._header_item = self.header.create_image(
@@ -1581,7 +1708,7 @@ class ResultWindow:
         }
         self._resize_strips = {}
         for direction, cfg in {**specs, **corners}.items():
-            strip = tk.Frame(body, bg=BG, bd=0, highlightthickness=0,
+            strip = tk.Frame(body, bg=self.th["bg"], bd=0, highlightthickness=0,
                              cursor=cfg.pop("cursor"))
             strip.place(**cfg)
             strip.bind("<ButtonPress-1>", lambda _e, d=direction: self._edge_press(d, _e))
@@ -1797,47 +1924,83 @@ class ResultWindow:
                     self.text.insert("end", s)
                 prev_block = False
             else:
+                tail = ""
+                nxt = segs[idx + 1] if idx + 1 < len(segs) else None
+                # 独立公式后面紧跟的句号/逗号：摘出来跟着公式行，否则它会
+                # 独自占一行，整段看着像被切碎了
+                if (nxt is not None and nxt[0] == "text"
+                        and (seg[2] or mathrender.is_block(seg[1]))):
+                    # 中文标点后面通常直接接汉字，不能要求后面是空白；
+                    # 英文标点则要，免得把 "1.5" 拆开
+                    m = re.match(
+                        r"[ \t]*([。，、；：！？]+|[,.;:!?]+(?=\s|$))", nxt[1])
+                    if m:
+                        tail = m.group(1)
+                        segs[idx + 1] = ("text", nxt[1][m.end():])
                 prev_block = self._insert_formula(
-                    seg[1], seg[2], px, dpi, max_w, linespace)
+                    seg[1], seg[2], px, dpi, max_w, linespace, tail)
         self.text.configure(state="disabled")
         self._schedule_fit(force=True)
 
     def _insert_formula(self, tex: str, display: bool, px: int, dpi: float,
-                        max_w: int, linespace: int) -> bool:
+                        max_w: int, linespace: int, tail: str = "") -> bool:
         """插一段公式，返回它是否占用了独立一行。
 
         渲染不出来就原样给出 LaTeX 源码并标色，绝不静默吞掉。
         """
         if self.text is None:
             return False
-        img = mathrender.render_image(tex, px=px, dpi=dpi, color=FG)
+        color = self.th["fg"]
+        # 先按「内容高度」量一遍：行内图片在 Tk 的 Text 里只能往上溢出，
+        # 一旦公式高于一行（矩阵、堆叠分式），下半截没地方悬挂，文字就会被
+        # 挤到公式底部，看起来整个错位。所以超过约两行高的公式一律当独立公式。
+        img = mathrender.render_image(tex, px=px, dpi=dpi, color=color, baseline=False)
         if img is None:
             self.text.insert("end", " " + tex.strip() + " ", "raw_math")
             return False
 
         from PIL import Image, ImageTk
 
-        # 行内公式绝不拆行：像 \dfrac{\eta}{1-\beta} 这种很高的式子，
-        # 拆走会让「……变为」和「，收敛更快」被硬生生分开。
-        # 宁可等比缩小，也要留在句子里。
-        if not display and img.height > linespace * 2.0:
-            ratio = (linespace * 2.0) / float(img.height)
+        block = display or mathrender.is_block(tex) or img.height > linespace * 1.9
+        if not block:
+            # 行内公式绝不拆行：像 \dfrac{\eta}{1-\beta} 这种式子拆走会让
+            # 「……变为」和「，收敛更快」被硬生生分开。这里补上基线以下的
+            # 空白，让 align="baseline" 能跟中文正文对齐。
+            img = mathrender.render_image(tex, px=px, dpi=dpi, color=color) or img
+        elif img.height > linespace * 2.0 and img.height > 240:
+            # 太高的整块公式才缩，普通三行矩阵保持原字号（矩阵要看得清）
+            ratio = 240.0 / float(img.height)
             img = img.resize((max(1, int(img.width * ratio)),
                               max(1, int(img.height * ratio))), Image.LANCZOS)
 
-        if img.width > max_w:
-            ratio = max_w / float(img.width)
-            img = img.resize((max_w, max(1, int(img.height * ratio))), Image.LANCZOS)
+        # 尾部标点要在同一行落脚，缩进得给它让出位置
+        reserve = int(px * 1.6) if (block and tail) else 0
+        limit = max(60, max_w - reserve)
+        if img.width > limit:
+            ratio = limit / float(img.width)
+            img = img.resize((limit, max(1, int(img.height * ratio))), Image.LANCZOS)
+        if block:
+            # 独立公式居中：Tk 的段落缩进/justify 对"只有图片的行"不生效，
+            # 干脆把透明边距补进图片本身——图片占满整行，内容自然落在正中。
+            # 有尾部标点时只补左侧：让「公式 + 标点」作为一个整体居中，
+            # 标点才不会飘到行尾去
+            left = max(0, (max_w - img.width - reserve) // 2)
+            right = 0 if tail else left
+            if left or right:
+                wide = Image.new(
+                    "RGBA", (img.width + left + right, img.height), (0, 0, 0, 0))
+                wide.paste(img, (left, 0))
+                img = wide
         photo = ImageTk.PhotoImage(img, master=self.text)
         self._math_photos.append(photo)
 
-        # 只有独立公式独占一行
-        block = display
         if block:
             at_start = self.text.index("end-1c") == "1.0"
             if not at_start and self.text.get("end-2c", "end-1c") != "\n":
                 self.text.insert("end", "\n")
             self.text.image_create("end", image=photo, align="center", padx=2, pady=3)
+            if tail:
+                self.text.insert("end", tail)
             self.text.insert("end", "\n")
             return True
         self.text.image_create("end", image=photo, align="baseline", padx=1)

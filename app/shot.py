@@ -81,6 +81,11 @@ class RegionSelector:
 
     MIN_SIZE = 6      # 小于这个尺寸当作误触
     DIMMING = "gray50"  # 选区外的网点遮罩，替代 Canvas 做不到的真半透明
+    # 配色学 QQ 截图：中性蓝的选框 + 白/浅灰的辅助线，不掺主题绿，
+    # 免得在杂志、幻灯片的彩色内容上分不清"这是界面的框"还是页面本身的框
+    EDGE = "#3d9bff"
+    GUIDE = "#d8d8d8"
+    HINT_BG = "#1b1b1b"
 
     def __init__(self, root, on_done=None, on_status=None):
         import tkinter as tk
@@ -161,16 +166,16 @@ class RegionSelector:
                 canvas.create_rectangle(0, 0, vw, vh, fill="black",
                                         outline="", stipple=self.DIMMING, tags="shade")
             )
-        self._rect = canvas.create_rectangle(0, 0, 0, 0, outline="#5ee08a", width=2,
+        self._rect = canvas.create_rectangle(0, 0, 0, 0, outline=self.EDGE, width=2,
                                              state="hidden")
         # 文字后面垫一块深色底：尺寸/提示可能落在浅色内容上，纯文字会看不见
-        self._hint_bg = canvas.create_rectangle(0, 0, 0, 0, fill="#10200f",
+        self._hint_bg = canvas.create_rectangle(0, 0, 0, 0, fill=self.HINT_BG,
                                                 outline="", state="hidden")
         self._hint = canvas.create_text(0, 0, text="", anchor="nw", fill="#ffffff",
                                         font=("Microsoft YaHei UI", 10), state="hidden")
         self._cross = [
-            canvas.create_line(0, 0, 0, 0, fill="#5ee08a", dash=(4, 4), state="hidden"),
-            canvas.create_line(0, 0, 0, 0, fill="#5ee08a", dash=(4, 4), state="hidden"),
+            canvas.create_line(0, 0, 0, 0, fill=self.GUIDE, dash=(4, 4), state="hidden"),
+            canvas.create_line(0, 0, 0, 0, fill=self.GUIDE, dash=(4, 4), state="hidden"),
         ]
 
         canvas.bind("<ButtonPress-1>", self._on_press)

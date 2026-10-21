@@ -191,9 +191,12 @@ nahida-translator/
 - **文字推理**：`llama-server`（llama.cpp）子进程，SSE 流式输出；显存不足自动回退 CPU
 - **图片推理**：另起一个 `llama-server` 加载 `--mmproj` 视觉投影层，纯 CPU、按需启动、闲置自动退出
 - **截图**：先把整个虚拟桌面抓成一张图冻结显示，框选期间鼠标全程在自己的窗口上，
-  松手直接从这张图裁剪——不会丢事件，也不可能把遮罩本身截进去
-- **公式排版**：matplotlib mathtext（Computer Modern / STIX 字体）渲染成透明底图片插进 Text 控件；
-  3 倍分辨率渲染再降采样，按 `depth` 修正基线；矩阵、分段函数等 mathtext 不支持的写法降级成源码并标色
+  松手直接从这张图裁剪——不会丢事件，也不可能把遮罩本身截进去。
+  框选界面与结果面板都用中性配色（不透明深灰 + 蓝色选框），截图内容不会被主题绿干扰
+- **公式排版**：matplotlib mathtext（STIX 字体）渲染成透明底图片插进 Text 控件；3 倍分辨率渲染再降采样，
+  按 `depth` 修正基线。mathtext 不认矩阵环境，所以在它之上加了一层结构化排版：拆出行列网格、
+  每格单独渲染、按列宽与基线拼回、自己画括号，`bmatrix` / `pmatrix` / `cases` / `aligned` 都能出图；
+  实在排不出来的（公式里混中文、未知命令）降级成源码并标色，复制出来仍是可用的 LaTeX
 - **热键**：Win32 `RegisterHotKey` 独占注册，被占用时自动顺延（钩子是广播，会双触发）
 - **窗口细节**：Win32 `SetWindowRgn` 圆角、`WS_EX_TRANSPARENT` 鼠标穿透、`SetWindowLong` 动态开关
 - **单实例**：命名互斥量 + PID 文件 + 退出看门狗，避免旧进程残留
@@ -236,8 +239,9 @@ nahida-translator/
 `python tools\download.py`（去掉 `--no-vision`）。日志 `logs\vision-server.log` 会写清楚是哪个文件找不到。
 
 **公式显示成一串 LaTeX 源码（金色的）？**
-那说明 mathtext 渲染不了这种写法，最常见的是矩阵 `\begin{bmatrix}`、分段函数 `\begin{cases}`，
-以及公式里混了中文。这时会原样显示源码而不是静默丢弃，复制出来仍然是可用的 LaTeX。
+矩阵（`bmatrix` / `pmatrix` / `vmatrix`）、分段函数（`cases`）、多行对齐（`aligned`）现在都能正常排版。
+仍然显示源码，通常是公式里混了中文（如 `\text{其中}`）或用了 mathtext 不认识的命令。
+这时会原样保留源码而不是静默丢弃，复制出来仍然是可用的 LaTeX。
 
 ## 版权与隐私
 
