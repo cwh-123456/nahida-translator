@@ -5,7 +5,15 @@
 from __future__ import annotations
 
 import logging
+import re
+import threading
 import tkinter as tk
+import tkinter.font as tkfont
+
+try:  # 直接以脚本方式加载时（调试用）退回绝对导入
+    from . import mathrender
+except ImportError:  # pragma: no cover
+    from app import mathrender
 
 log = logging.getLogger("ui")
 
@@ -1179,6 +1187,9 @@ class ResultWindow:
         self._bg_geom: tuple[int, int, int, int] | None = None
         self._topmost_job = None
         self._verify_jobs: list = []
+        # 公式混排：图片对象必须留引用，否则被 GC 后控件里会变成空白
+        self._math_photos: list = []
+        self._plain = ""          # 未经渲染的原文（含 LaTeX），复制时用它
 
     # ---------- 构建 ----------
     def _build(self) -> None:
@@ -1266,6 +1277,9 @@ class ResultWindow:
         scroll.pack(side="right", fill="y")
         self.text.pack(side="left", fill="both", expand=True)
         self.text.configure(state="disabled")
+        # mathtext 渲染不了（矩阵、分段函数等）时，用这个样式把源码标出来
+        self.text.tag_configure("raw_math", foreground=GOLD,
+                                font=(family, max(9, size - 2)))
         self.text.bind("<Control-c>", self._copy_event)
         self.text.bind("<Button-1>", self._on_text_click)
 
@@ -1287,6 +1301,10 @@ class ResultWindow:
             font=(family, max(8, size - 3)), anchor="w",
         )
         self.status.pack(side="left", fill="x", expand=True)
+
+        # 后台把公式渲染器热起来：首次 import matplotlib 要 0.6 秒左右，
+        # 不预热的话第一次出现公式时面板会卡一下
+        threading.Thread(target=mathrender.warmup, daemon=True).start()
 
         # 四边 + 四角的透明缩放条（贴在内容边缘，视觉上和背景一致）
         self._build_resize_strips(body)
@@ -1716,23 +1734,113 @@ class ResultWindow:
         self._schedule_fit()
 
     def clear(self) -> None:
+        self._plain = ""
         self._set_text("")
 
     def set_final(self, text: str) -> None:
-        """翻译结束：用清洗后的最终文本替换流式过程中显示的内容。"""
-        self._set_text(text)
+        """翻译结束：用清洗后的最终文本替换流式过程中显示的内容。
+
+        带公式时改走混排渲染（公式渲染成图片插进 Text），纯文本仍然走老路径。
+        """
+        self._set_rich(text)
 
     def finish(self, seconds: float, tokens: int) -> None:
         self.set_status(f"本地模型 · {seconds:.1f}s")
         self._schedule_fit(force=True)
 
     def show_error(self, message: str) -> None:
+        self._plain = ""
         self._set_text(message)
         self.set_status("出错了")
+
+    # ---------- 文字 + 公式混排 ----------
+    def _set_rich(self, value: str) -> None:
+        self._plain = value or ""
+        if self.text is None:
+            return
+        if not value or not mathrender.has_math(value):
+            self._set_text(value)
+            return
+
+        ui = self.cfg["ui"]
+        family = ui.get("font_family", "Microsoft YaHei UI")
+        size = int(ui.get("font_size", 11))
+        try:
+            linespace = tkfont.Font(family=family, size=size).metrics("linespace")
+        except tk.TclError:
+            linespace = size + 8
+        # 公式字面高度跟正文行高对齐，避免同一行里一大一小
+        px = max(12, int(round(linespace * 0.76)))
+        try:
+            dpi = max(72.0, float(self.root.winfo_fpixels("1i")))
+        except tk.TclError:
+            dpi = 96.0
+        max_w = max(140, self.width - 46)
+
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self._math_photos.clear()
+        segs = mathrender.split_segments(value)
+        prev_block = False
+        for idx, seg in enumerate(segs):
+            if seg[0] == "text":
+                s = seg[1]
+                nxt = segs[idx + 1] if idx + 1 < len(segs) else None
+                # 独立公式自己会换行：紧挨着它的空行交给它处理，
+                # 否则「原文换行 + 公式前后各一个换行」会叠出大片空白
+                if prev_block:
+                    s = s.lstrip("\n")
+                if nxt is not None and nxt[0] == "math" and nxt[2]:
+                    s = s.rstrip("\n")
+                s = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", s)
+                if s:
+                    self.text.insert("end", s)
+                prev_block = False
+            else:
+                prev_block = self._insert_formula(
+                    seg[1], seg[2], px, dpi, max_w, linespace)
+        self.text.configure(state="disabled")
+        self._schedule_fit(force=True)
+
+    def _insert_formula(self, tex: str, display: bool, px: int, dpi: float,
+                        max_w: int, linespace: int) -> bool:
+        """插一段公式，返回它是否占用了独立一行。
+
+        渲染不出来就原样给出 LaTeX 源码并标色，绝不静默吞掉。
+        """
+        if self.text is None:
+            return False
+        img = mathrender.render_image(tex, px=px, dpi=dpi, color=FG)
+        if img is None:
+            self.text.insert("end", " " + tex.strip() + " ", "raw_math")
+            return False
+
+        from PIL import Image, ImageTk
+
+        if img.width > max_w:
+            ratio = max_w / float(img.width)
+            img = img.resize((max_w, max(1, int(img.height * ratio))), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(img, master=self.text)
+        self._math_photos.append(photo)
+
+        # 独立公式、或比一行还高的公式，必须独占一行：
+        # 硬塞在文字中间会把行高撑开，整段排版立刻松掉
+        block = display or img.height > linespace * 1.45
+        if block:
+            at_start = self.text.index("end-1c") == "1.0"
+            if not at_start and self.text.get("end-2c", "end-1c") != "\n":
+                self.text.insert("end", "\n")
+            self.text.image_create("end", image=photo, align="center", padx=2, pady=3)
+            self.text.insert("end", "\n")
+            return True
+        self.text.image_create("end", image=photo, align="baseline", padx=1)
+        return False
 
     def _set_text(self, value: str) -> None:
         if self.text is None:
             return
+        self._plain = value or ""
+        self._math_photos.clear()
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
         if value:
@@ -1764,10 +1872,20 @@ class ResultWindow:
             cur_h = max(self.win.winfo_height(), 80)
             self.win.geometry(f"{self.width}x{cur_h}+{self._x}+{self._y}")
             self.win.update_idletasks()
-            # 2) 按显示行数设置文本控件高度（留 1 行余量，避免裁切）
-            lines = self.text.count("1.0", "end-1c", "displaylines")
-            n = int(lines[0]) if lines else 1
-            n = max(3, min(n + 1, 14))
+            # 2) 按显示高度设置文本控件高度（留 1 行余量，避免裁切）
+            #    有公式图片时 displaylines 会低估高度（一张 60px 的公式只算 1 行），
+            #    所以优先按像素折算行数
+            n = 0
+            try:
+                ypx = int(self.text.count("1.0", "end-1c", "ypixels")[0])
+                ls = tkfont.Font(font=self.text.cget("font")).metrics("linespace")
+                n = int(ypx / max(1, ls)) + 2
+            except (tk.TclError, IndexError, ValueError):
+                n = 0
+            if n <= 0:
+                lines = self.text.count("1.0", "end-1c", "displaylines")
+                n = (int(lines[0]) if lines else 1) + 1
+            n = max(3, min(n, 20))
             if int(self.text.cget("height")) != n:
                 self.text.configure(height=n)
                 self.win.update_idletasks()
@@ -1881,7 +1999,8 @@ class ResultWindow:
             try:
                 sel = self.text.get("sel.first", "sel.last")
             except tk.TclError:
-                sel = self.text.get("1.0", "end-1c")
+                # 没有选区时复制全文：用原始文本，公式保持 LaTeX 源码而不是丢失
+                sel = self._plain or self.text.get("1.0", "end-1c")
             if sel:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(sel)
@@ -1890,7 +2009,7 @@ class ResultWindow:
 
     def _copy_all(self) -> None:
         if self.text is not None:
-            content = self.text.get("1.0", "end-1c").strip()
+            content = (self._plain or self.text.get("1.0", "end-1c")).strip()
             if content:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(content)
