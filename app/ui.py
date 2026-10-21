@@ -27,9 +27,9 @@ ACCENT = "#9be26f"      # 草元素绿（高亮）
 ACCENT_DIM = "#5f9e4a"  # 深一档草绿
 GOLD = "#e9c97d"        # 金色点缀（微光/星点）
 
-# 两套配色。leaf 是纳西妲主题（默认）；neutral 是中性灰，专给截图/图片翻译用：
-# 截图面板的目的是读内容，半透明的绿色玻璃配上深色壁纸只会让正文更难认，
-# 所以那一类面板一律不透明、灰底白字，学 QQ 截图的干净观感。
+# 两套配色。leaf 是纳西妲主题（默认，用于划词翻译）；
+# light 是白底黑字，专给截图/图片翻译用——面板的目的是"读一页纸"，
+# 半透明的绿色玻璃配上深色壁纸只会让正文更难认，白底最接近 PDF 阅读器。
 LEAF = {
     "name": "leaf",
     "bg": BG, "bg_soft": BG_SOFT, "border": BORDER,
@@ -40,15 +40,15 @@ LEAF = {
     "header_rule": (95, 158, 74, 130), "spark": (233, 201, 125),
     "gif": True,
 }
-NEUTRAL = {
-    "name": "neutral",
-    "bg": "#1e1e1e", "bg_soft": "#2f2f2f", "border": "#3d3d3d",
-    "fg": "#eaeaea", "muted": "#9a9a9a", "accent": "#4c9aff",
-    "accent_dim": "#2f6ea8", "gold": "#c8c8c8",
-    "rule": "#333333", "select": "#3a4a5e",
-    "header_top": (40, 40, 40), "header_bottom": (26, 26, 26),
-    "header_glow": (255, 255, 255, 10), "header_vein": (255, 255, 255, 8),
-    "header_rule": (72, 72, 72, 220), "spark": (200, 200, 200),
+LIGHT = {
+    "name": "light",
+    "bg": "#ffffff", "bg_soft": "#f3f3f3", "border": "#d6d6d6",
+    "fg": "#1a1a1a", "muted": "#6e6e6e", "accent": "#2b6cb0",
+    "accent_dim": "#1f4e7e", "gold": "#9a6a12",
+    "rule": "#e6e6e6", "select": "#cfe2ff",
+    "header_top": (252, 252, 252), "header_bottom": (242, 242, 242),
+    "header_glow": (0, 0, 0, 8), "header_vein": (0, 0, 0, 10),
+    "header_rule": (214, 214, 214, 255), "spark": (190, 190, 190),
     "gif": False,
 }
 
@@ -187,7 +187,7 @@ MODE_TITLES = {
 def render_header_band(width: int, height: int, th: dict | None = None):
     """标题带背景：深绿渐变 + 草绿光晕 + 细叶脉 + 金色星点（纳西妲风格）。
 
-    neutral 主题用的是同一套结构，只是颜色换成灰阶、光晕压到几乎看不见，
+    light 主题用的是同一套结构，只是换成白底灰边、光晕压到几乎看不见，
     几何一次都不用改。
     """
     from PIL import Image, ImageDraw, ImageFilter
@@ -276,23 +276,25 @@ class PillButton:
 
     # ---------- 绘制 ----------
     def _palette(self, state: str):
-        if self.th["name"] == "neutral":
+        if self.th["name"] == "light":
+            # 白底上的按钮：浅灰填充 + 细边框，强调色用深蓝描边，
+            # 不要做成深色块——那样会把白底页面切得很碎
             if self.close:
                 return {
-                    "normal": ((0, 0, 0, 0), None, (154, 154, 154, 255)),
-                    "hover": ((62, 62, 62, 255), None, (255, 255, 255, 255)),
-                    "pressed": ((46, 46, 46, 255), None, (235, 235, 235, 255)),
+                    "normal": ((0, 0, 0, 0), None, (120, 120, 120, 255)),
+                    "hover": ((226, 226, 226, 255), None, (30, 30, 30, 255)),
+                    "pressed": ((208, 208, 208, 255), None, (30, 30, 30, 255)),
                 }[state]
             if self.accent:
                 return {
-                    "normal": ((46, 46, 46, 255), (76, 154, 255, 120), (234, 234, 234, 255)),
-                    "hover": ((60, 60, 60, 255), (76, 154, 255, 225), (255, 255, 255, 255)),
-                    "pressed": ((38, 38, 38, 255), (76, 154, 255, 160), (225, 235, 248, 255)),
+                    "normal": ((255, 255, 255, 255), (43, 108, 176, 110), (30, 30, 30, 255)),
+                    "hover": ((238, 245, 255, 255), (43, 108, 176, 210), (20, 40, 70, 255)),
+                    "pressed": ((222, 236, 254, 255), (43, 108, 176, 160), (20, 40, 70, 255)),
                 }[state]
             return {
-                "normal": ((48, 48, 48, 255), (74, 74, 74, 255), (236, 236, 236, 255)),
-                "hover": ((62, 62, 62, 255), (110, 110, 110, 255), (255, 255, 255, 255)),
-                "pressed": ((40, 40, 40, 255), (90, 90, 90, 255), (224, 224, 224, 255)),
+                "normal": ((244, 244, 244, 255), (214, 214, 214, 255), (40, 40, 40, 255)),
+                "hover": ((234, 234, 234, 255), (185, 185, 185, 255), (20, 20, 20, 255)),
+                "pressed": ((222, 222, 222, 255), (170, 170, 170, 255), (20, 20, 20, 255)),
             }[state]
 
         if self.close:
@@ -1214,8 +1216,8 @@ class ResultWindow:
         self.on_copy = on_copy
         self.on_close = on_close
         self.on_mode_click = on_mode_click
-        self._style = style if style in ("leaf", "neutral") else "leaf"
-        self.th = NEUTRAL if self._style == "neutral" else LEAF
+        self._style = style if style in ("leaf", "light") else "leaf"
+        self.th = LIGHT if self._style == "light" else LEAF
         self.win: tk.Toplevel | None = None
         self.text: tk.Text | None = None
         self.status: tk.Label | None = None
@@ -1261,16 +1263,16 @@ class ResultWindow:
             return 0.72
 
     def set_style(self, style: str) -> None:
-        """切换配色：leaf（纳西妲绿）/ neutral（中性灰，截图与图片翻译用）。
+        """切换配色：leaf（纳西妲绿）/ light（白底黑字，截图与图片翻译用）。
 
         面板是长生命周期的单例，已经建好的控件不会认新颜色，所以换主题时
         直接销毁窗口，下次 show 时按新主题重新 _build 一次。
         """
-        style = style if style in ("leaf", "neutral") else "leaf"
+        style = style if style in ("leaf", "light") else "leaf"
         if style == self._style:
             return
         self._style = style
-        self.th = NEUTRAL if style == "neutral" else LEAF
+        self.th = LIGHT if style == "light" else LEAF
         if self.bg is not None:
             try:
                 self.bg.hide()

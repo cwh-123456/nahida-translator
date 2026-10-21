@@ -2,7 +2,7 @@
 
 跑法：
     D:/python/python.exe tests/test_panel_style.py
-产物：logs/panelcheck/neutral.png、leaf.png
+产物：logs/panelcheck/light.png、leaf.png
 """
 import os
 import sys
@@ -85,7 +85,7 @@ def shot(style: str) -> tuple[int, tuple[int, int]]:
 
 
 def style_switch() -> bool:
-    """同一块面板在 leaf / neutral 之间来回切，不能崩、配色要跟着变。"""
+    """同一块面板在 leaf / light 之间来回切，不能崩、配色要跟着变。"""
     root = tk.Tk()
     root.withdraw()
     win = ui.ResultWindow(root, CFG, style="leaf")
@@ -94,12 +94,12 @@ def style_switch() -> bool:
     pump(root, 20)
     leaf_bg = win.text.cget("bg")
 
-    win.set_style("neutral")          # 换主题应销毁旧窗口
+    win.set_style("light")          # 换主题应销毁旧窗口
     assert win.win is None, "换主题后旧窗口还活着"
     win.open(0, 0, "截图 757×267", "识别中")
     win.set_final(r"$y=\begin{bmatrix}c_1\\c_2\end{bmatrix}$ 测试")
     pump(root, 20)
-    neutral_bg = win.text.cget("bg")
+    light_bg = win.text.cget("bg")
     alpha = float(win.win.attributes("-alpha"))
 
     win.set_style("leaf")
@@ -110,17 +110,17 @@ def style_switch() -> bool:
     pump(root, 5)
     root.destroy()
 
-    ok = leaf_bg == ui.LEAF["bg"] and neutral_bg == ui.NEUTRAL["bg"] and back_bg == leaf_bg
+    ok = leaf_bg == ui.LEAF["bg"] and light_bg == ui.LIGHT["bg"] and back_bg == leaf_bg
     ok = ok and abs(alpha - 1.0) < 1e-6
-    print(f"[切换] leaf={leaf_bg} neutral={neutral_bg} 回到={back_bg} alpha={alpha}")
+    print(f"[切换] leaf={leaf_bg} neutral={light_bg} 回到={back_bg} alpha={alpha}")
     return ok
 
 
 def main() -> int:
-    n_neutral, _ = shot("neutral")
+    n_light, _ = shot("light")
     n_leaf, _ = shot("leaf")
-    ok = n_neutral >= 3 and n_leaf >= 3 and style_switch()
-    print("结果:", "PASS" if ok else "FAIL", f"(中性 {n_neutral} / 绿色 {n_leaf})")
+    ok = n_light >= 3 and n_leaf >= 3 and style_switch()
+    print("结果:", "PASS" if ok else "FAIL", f"(浅色 {n_light} / 绿色 {n_leaf})")
     return 0 if ok else 1
 
 

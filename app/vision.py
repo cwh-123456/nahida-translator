@@ -30,16 +30,20 @@ class PortBindError(EngineError):
 # 图片翻译的提示词。这里比文字翻译严厉得多：图片里的内容是模型"看"出来的，
 # 一旦它顺手补一句原文没有的话，用户没有任何办法察觉。
 IMAGE_PROMPT = (
-    "你是一个严谨的图片翻译助手。用户会给你一张图片（可能是论文、PPT、扫描件或截图）。"
-    "请把图片里的文字内容翻译成简体中文。严格遵守：\n"
-    "1. 只翻译图片里真实存在的文字，绝对不许补充、推测、总结或编造图片里没有的内容；\n"
-    "2. 所有数学公式一律用 LaTeX 表示，行内公式用 $...$，独立公式用 $$...$$；"
-    "严格保留上标、下标、求和上下限、分式、根号、矩阵、希腊字母，数字和指数一个都不许改；\n"
-    "3. 公式本身不翻译（变量名、函数名保持原样），只翻译公式周围的自然语言；\n"
-    "4. 按原文的层次和段落顺序输出，标题、项目符号、编号都要保留；\n"
-    "5. 某个词或公式实在看不清时，写 [未识别] 并跳过，不要猜；\n"
-    "6. 不要输出「以下是翻译」「图片中写着」这类前后缀，直接给译文；\n"
-    "7. 如果图片里全是中文，就原样输出原文（公式仍转成 LaTeX）。"
+    "你是学术图片翻译器。用户会给你一张图片（论文、PPT、扫描件或截图）。\n"
+    "你的任务：把图片里所有自然语言翻译成简体中文，数学公式保留成 LaTeX。\n"
+    "硬性要求：\n"
+    "1. 输出必须是简体中文。图中的英文、日文等一律译成中文，**禁止照抄原文句子**；"
+    "这是最容易犯的错误——整页英文论文如果原样输出就等于没做事；\n"
+    "2. 变量名、函数名、缩写（S、x、LaTeX、GPU）保持原样，但它们所在的句子仍要翻成中文；\n"
+    "3. 公式用 LaTeX：行内 $...$，独立 $$...$$；严格保留上标、下标、求和上下限、分式、根号、"
+    "矩阵、希腊字母，数字和指数一个都不许改；公式本身不翻译；\n"
+    "4. 只翻译图片里真实存在的内容，绝不补充、推测、总结或编造；看不清就写 [未识别]；\n"
+    "5. 保留原文的标题、编号和段落顺序；不要输出「以下是翻译」这类前后缀；\n"
+    "6. 如果图片里本来就是中文，直接输出原文（公式仍转成 LaTeX）。\n"
+    "示例——图片里写着：20 Sy = 0 is solved by y = 0. This is trivial.\n"
+    "正确输出：20 $Sy=0$ 的解为 $y=0$。这很简单。\n"
+    "错误输出：20 $Sy=0$ is solved by $y=0$. This is trivial.（没有翻译，不算完成）"
 )
 
 IMAGE_SUMMARY_PROMPT = (
@@ -423,6 +427,22 @@ class VisionTranslator:
                 data_url, system, user, on_token=on_token,
                 max_tokens=1600 if mode != "summary" else 900,
             )
+
+            # 只转写没翻译时重来一次。重试不带 on_token：界面上已经流过一版
+            # 原文了，再流一版中文会混在一起，不如等结果整体替换。
+            if mode == "translate" and looks_untranslated(clean_image_output(text)):
+                log.warning("图片输出中文占比 %.0f%%，判定为只转写未翻译，重试",
+                            han_ratio(text) * 100)
+                if on_status:
+                    on_status("模型只转写了原文，正在重新翻译…")
+                again, n2 = self._chat_image(
+                    data_url, system,
+                    "请把这张图片里的英文内容翻译成简体中文，不要照抄原文句子。",
+                    max_tokens=1600,
+                )
+                if again:
+                    text, ntok = again, ntok + n2
+
             self._last_used = time.time()
             return TranslationResult(clean_image_output(text), time.time() - t0, ntok)
 
@@ -432,6 +452,35 @@ _IMG_PREFIX = (
     "以下是图片内容的翻译：|以下是图片的翻译：|以下是翻译：|图片内容翻译如下：|"
     "图片中的内容翻译如下：|翻译如下：|以下是图片中文字的中文翻译："
 )
+
+
+def han_ratio(text: str) -> float:
+    """自然语言部分里，汉字占「汉字 + 拉丁字母」的比例。
+
+    公式要先剔掉：矩阵、LaTeX 命令里的字母会严重稀释比例，
+    让一段已经翻好的中文被误判成"没翻译"。
+    """
+    try:
+        from . import mathrender
+        segs = mathrender.split_segments(text or "")
+        plain = "".join(s[1] for s in segs if s[0] == "text")
+    except Exception:
+        plain = text or ""
+    han = sum(1 for c in plain if "\u4e00" <= c <= "\u9fff")
+    latin = sum(1 for c in plain if "a" <= c.lower() <= "z")
+    total = han + latin
+    if total < 24:          # 几乎没有自然语言，没什么可翻的
+        return 1.0
+    return han / total
+
+
+def looks_untranslated(text: str) -> bool:
+    """判断模型是不是只转写、没翻译。
+
+    4B 的视觉模型遇到整页英文论文时，很容易把"翻译"做成"抄写"，
+    这时候中文占比会低得离谱，值得用更强硬的提示重问一次。
+    """
+    return han_ratio(text) < 0.12
 
 
 def clean_image_output(text: str) -> str:
