@@ -80,7 +80,10 @@ class RegionSelector:
     """
 
     MIN_SIZE = 6      # 小于这个尺寸当作误触
-    DIMMING = "gray50"  # 选区外的网点遮罩，替代 Canvas 做不到的真半透明
+    # 选区外的压暗比例。不用 Canvas 的 stipple 网点：网点是"黑白像素点阵"，
+    # 在彩色壁纸（比如绿色花叶）上会糊成一片脏绿，正是 QQ 截图里看不到的观感。
+    # 这里直接在 PIL 里把整张屏按比例混黑，再把选区那块原图贴回去。
+    DIM = 0.55
     # 配色学 QQ 截图：中性蓝的选框 + 白/浅灰的辅助线，不掺主题绿，
     # 免得在杂志、幻灯片的彩色内容上分不清"这是界面的框"还是页面本身的框
     EDGE = "#3d9bff"
@@ -99,11 +102,14 @@ class RegionSelector:
         self.canvas = None
         self._photo = None
         self._screen = None
+        self._dimmed = None
         self._vscreen = (0, 0, 0, 0)
         self._w = self._h = 0
         self._start = None
         self._rect = None
-        self._shades: list = []
+        self._sel_item = None
+        self._sel_photo = None
+        self._sel_box = None
         self._hint = None
         self._hint_bg = None
         self._cross: list = []
@@ -126,7 +132,9 @@ class RegionSelector:
         finally:
             self._active = False
             self._screen = None
+            self._dimmed = None
             self._photo = None
+            self._sel_photo = None
             self._teardown()
 
     # ---------- 构建 ----------
@@ -157,15 +165,15 @@ class RegionSelector:
 
         from PIL import ImageTk
 
-        self._photo = ImageTk.PhotoImage(self._screen, master=win)
+        # 整屏先按比例混黑，作为压暗后的底图；选区那块再从原图上裁一块贴回来，
+        # 视觉上就是"四周暗、中间亮"，和 QQ 截图一致。
+        # 比 Canvas 的 stipple 网点干净得多：网点在彩色壁纸上会糊成一片脏绿。
+        self._dimmed = Image.blend(
+            self._screen, Image.new("RGB", self._screen.size, (0, 0, 0)), self.DIM)
+        self._photo = ImageTk.PhotoImage(self._dimmed, master=win)
         canvas.create_image(0, 0, image=self._photo, anchor="nw")
-
-        # 选区外的四块网点遮罩（初始铺满全屏）
-        for _ in range(4):
-            self._shades.append(
-                canvas.create_rectangle(0, 0, vw, vh, fill="black",
-                                        outline="", stipple=self.DIMMING, tags="shade")
-            )
+        # 选区原图（初始隐藏，拖动时才贴）
+        self._sel_item = canvas.create_image(0, 0, anchor="nw", state="hidden")
         self._rect = canvas.create_rectangle(0, 0, 0, 0, outline=self.EDGE, width=2,
                                              state="hidden")
         # 文字后面垫一块深色底：尺寸/提示可能落在浅色内容上，纯文字会看不见
@@ -239,26 +247,50 @@ class RegionSelector:
             return
         self._update_rect(*self._start, *self._clamp(event.x, event.y))
 
+    def _show_selection(self, lx: int, ty: int, rx: int, ry: int) -> None:
+        """把选区内那块原图贴回压暗的底图上。
+
+        只重建有变化的选区：拖动时每帧都建一张 PhotoImage 会把主线程拖住，
+        尺寸或位置没变（比如只是按着不动）就直接复用上一张。
+        """
+        if self.canvas is None:
+            return
+        w, h = rx - lx, ry - ty
+        if w < 1 or h < 1 or self._screen is None:
+            self.canvas.itemconfigure(self._sel_item, state="hidden")
+            self._sel_box = None
+            return
+        box = (lx, ty, rx, ry)
+        if box == self._sel_box and self._sel_photo is not None:
+            return
+        try:
+            from PIL import ImageTk
+
+            crop = self._screen.crop(box)
+            self._sel_photo = ImageTk.PhotoImage(crop, master=self.win)
+            self.canvas.itemconfigure(self._sel_item, image=self._sel_photo, state="normal")
+            self.canvas.coords(self._sel_item, lx, ty)
+            # 贴上去的原图会盖住选框和十字辅助线，按"底图 → 原图 → 选框 → 辅助线 → 提示"
+            # 的顺序重新抬一遍
+            self.canvas.tag_raise(self._sel_item)
+            self.canvas.tag_raise(self._rect)
+            for line in self._cross:
+                self.canvas.tag_raise(line)
+            self.canvas.tag_raise(self._hint_bg)
+            self.canvas.tag_raise(self._hint)
+            self._sel_box = box
+        except Exception as exc:
+            log.info("贴选区原图失败: %s", exc)
+
     def _update_rect(self, x0: int, y0: int, x1: int, y1: int) -> None:
-        """选区矩形 + 外部四块遮罩 + 尺寸提示，全部一次算完。"""
-        vw, vh = self._w, self._h
+        """选区矩形 + 选区原图 + 尺寸提示，全部一次算完。"""
         lx, rx = (x0, x1) if x0 <= x1 else (x1, x0)
         ty, by = (y0, y1) if y0 <= y1 else (y1, y0)
-        lx, rx = max(0, lx), min(vw, rx)
-        ty, by = max(0, ty), min(vh, by)
+        lx, rx = max(0, lx), min(self._w, rx)
+        ty, by = max(0, ty), min(self._h, by)
 
         self.canvas.coords(self._rect, lx, ty, rx, by)
-        # 上、下、左、右四块，围出中间那个"洞"（Canvas 没有真半透明，用网点代替）
-        boxes = [
-            (0, 0, vw, ty),
-            (0, by, vw, vh),
-            (0, ty, lx, by),
-            (rx, ty, vw, by),
-        ]
-        for item, box in zip(self._shades, boxes):
-            self.canvas.coords(item, *box)
-            # 退化成一个点时 coords 会变成 0 宽，Tk 不画，正好
-            self.canvas.itemconfigure(item, state="normal" if box[2] > box[0] and box[3] > box[1] else "hidden")
+        self._show_selection(lx, ty, rx, by)
 
         w, h = rx - lx, by - ty
         label = f"{w} × {h}"
@@ -338,5 +370,6 @@ class RegionSelector:
 
     def _teardown(self) -> None:
         self._close()
-        self._shades.clear()
+        self._sel_photo = None
+        self._sel_box = None
         self._cross.clear()
