@@ -68,6 +68,46 @@ DELIM_CASES = [
 ]
 
 
+def delim_span(img, side: str, cols: int = 12) -> tuple[int, int]:
+    """定界符那几列里，墨迹从第几行到第几行。
+
+    方括号是"竖线 + 上下各一条横臂"。之前画布高度只按内容算，括号比内容高一圈，
+    下边那条横臂被裁掉了，用户看到的就是"只剩一横一竖"。所以这里要求
+    墨迹从顶部一直铺到底部，差 3 行以上就说明某条横臂丢了。
+    """
+    alpha = img.split()[-1]
+    w, h = alpha.size
+    if side == "L":
+        xs = range(0, min(cols, w))
+    else:
+        xs = range(max(0, w - cols), w)
+    rows = [y for y in range(h)
+            if any(alpha.getpixel((x, y)) > 40 for x in xs)]
+    return (min(rows), max(rows)) if rows else (-1, -1)
+
+
+def check_delim_arms() -> bool:
+    ok = True
+    for name, tex in (("bmatrix", r"\begin{bmatrix} 1 \\ 0 \end{bmatrix}"),
+                      ("pmatrix", r"\begin{pmatrix} 1 \\ 0 \end{pmatrix}"),
+                      ("vmatrix", r"\begin{vmatrix} 1 \\ 0 \end{vmatrix}")):
+        # baseline=False：不要底部补的基线空白，否则"墨迹没到底"是补白的锅
+        img = mathrender.render_image(tex, px=16, color="#f1f8e8", baseline=False)
+        if img is None:
+            print(f"  ✗ {name} 渲染失败")
+            ok = False
+            continue
+        h = img.height
+        top_l, bot_l = delim_span(img, "L")
+        top_r, bot_r = delim_span(img, "R")
+        good = (top_l <= 2 and bot_l >= h - 3 and top_r <= 2 and bot_r >= h - 3)
+        print(f"  {'✓' if good else '✗'} {name:8s} 画布高 {h:3d}  "
+              f"左 {top_l}-{bot_l}  右 {top_r}-{bot_r}"
+              f"{'' if good else '  ← 括号上下横臂被裁掉了'}")
+        ok = ok and good
+    return ok
+
+
 def check_delims() -> bool:
     ok = True
     for name, tex, want in DELIM_CASES:
@@ -105,6 +145,8 @@ def main() -> int:
 
     print("\n定界符左右配对：")
     delims = check_delims()
+    print("\n定界符上下横臂：")
+    arms = check_delim_arms()
 
     # 分段判定：价格不算公式，单变量要算
     seg = mathrender.split_segments("价格是 $5 和 $10，而 $S$ 是矩阵")
@@ -114,7 +156,7 @@ def main() -> int:
     assert sum(1 for k, _ in kinds if k == "math") == 1, "价格被误判成公式了"
 
     print(f"\n{ok}/{len(CASES)} 条公式渲染成功，图在 {OUT}")
-    ok = ok == len(CASES) and delims
+    ok = ok == len(CASES) and delims and arms
     return 0 if ok else 1
 
 

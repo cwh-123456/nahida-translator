@@ -116,6 +116,42 @@ def style_switch() -> bool:
     return ok
 
 
+def line_kinds(win) -> dict:
+    """按行统计每行里出现了什么：{'text', 'image'}。"""
+    chunks = win.text.dump("1.0", "end-1c", text=True, image=True)
+    by_line: dict[int, set] = {}
+    # dump 返回 (类型, 内容, 索引)，索引在第三个位置
+    for kind, _val, idx in chunks:
+        line = int(str(idx).split(".")[0])
+        by_line.setdefault(line, set()).add(kind)
+    return by_line
+
+
+def inline_packing() -> bool:
+    """短文字 + 大矩阵要能排在同一行里，而不是一句一断成四行。
+
+    之前"含矩阵就独占一行"，一句「20 [矩阵] 的解为 [矩阵]。」被拆成四行。
+    现在只有 `$$` 和高得离谱的才独占一行，其余行内排。
+    """
+    root = tk.Tk()
+    root.withdraw()
+    win = ui.ResultWindow(root, CFG, style="leaf")
+    win.open(50, 50, "划词", "翻译中")
+    win.set_final(TEXT)
+    pump(root, 30)
+
+    kinds = line_kinds(win)
+    mixed = [ln for ln, k in kinds.items() if "text" in k and "image" in k]
+    n_lines = len([1 for ln, k in kinds.items() if k])
+    ok = bool(mixed) and n_lines <= 5
+    print(f"[排布] 共 {n_lines} 行，图文混排的行 {mixed}"
+          f"{'' if ok else '  ← 大矩阵还是被强行独占了一行'}")
+    win.close()
+    pump(root, 5)
+    root.destroy()
+    return ok
+
+
 def both_paths_green() -> bool:
     """产品决定：图片翻译和划词翻译都用纳西妲绿，谁都不许偷偷切白底。
 
@@ -134,7 +170,8 @@ def both_paths_green() -> bool:
 def main() -> int:
     n_light, _ = shot("light")
     n_leaf, _ = shot("leaf")
-    ok = n_light >= 3 and n_leaf >= 3 and style_switch() and both_paths_green()
+    ok = (n_light >= 3 and n_leaf >= 3 and style_switch()
+          and both_paths_green() and inline_packing())
     print("结果:", "PASS" if ok else "FAIL", f"(浅色 {n_light} / 绿色 {n_leaf})")
     return 0 if ok else 1
 

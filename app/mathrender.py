@@ -304,19 +304,6 @@ def _absorb_delims(prefix: str, suffix: str, env: str):
     return prefix, suffix, left, right
 
 
-# 天生适合独立成行的公式：矩阵、分段函数、多行对齐。
-# 它们在行内既排不好（Tk 的图片只能向上溢出），也没必要挤在句子里。
-_BLOCK_ENV = re.compile(
-    r"\\begin\s*\{\s*(?:matrix|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|"
-    r"smallmatrix|array|cases|rcases|aligned|align\*?|gathered|split|eqnarray\*?)"
-)
-
-
-def is_block(tex: str) -> bool:
-    """这段公式是否应该独占一行。"""
-    return bool(tex) and _BLOCK_ENV.search(tex) is not None
-
-
 def _split_envs(tex: str) -> list[tuple]:
     """拆成 [("tex", 片段) | ("env", 环境名, 内容, 左括号, 右括号)]。"""
     parts: list[tuple] = []
@@ -472,14 +459,17 @@ def _make_delim(kind: str, height: int, px: int, color: str, side: str):
         d.rectangle([0, 0, max(0, lw - 1), h - 1], fill=rgb)
         if kind == "dbar":
             d.rectangle([max(0, w - lw), 0, w - 1, h - 1], fill=rgb)
-        return img
-
-    if kind == "bracket":
+    elif kind == "bracket":
+        # 用三个矩形拼，不用 d.line：折线在拐角处的描边宽度会被 PIL 摊薄，
+        # 上臂和下臂一个粗一个细（用户看到的"下面那条横线没了"就是这么来的）
         img = Image.new("RGBA", (arm + lw, h + lw), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
-        y0, y1 = lw // 2, h + lw // 2
-        d.line([(arm, y0), (lw // 2, y0), (lw // 2, y1), (arm, y1)],
-               fill=rgb, width=lw, joint="curve")
+        x = lw // 2
+        top = lw // 2
+        bot = h + lw // 2
+        d.rectangle([x, top, x + lw - 1, bot], fill=rgb)              # 竖
+        d.rectangle([x, top, x + arm, top + lw - 1], fill=rgb)        # 上横臂
+        d.rectangle([x, bot - lw + 1, x + arm, bot], fill=rgb)        # 下横臂
     elif kind == "brace":
         img = Image.new("RGBA", (arm + lw, h + lw), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
@@ -499,6 +489,14 @@ def _make_delim(kind: str, height: int, px: int, color: str, side: str):
         d = ImageDraw.Draw(img)
         # 90°→270° 逆时针：从上方中点绕过左侧到下方中点，正好是 "("
         d.arc([0, 0, bw * 2 - 1, h - 1], 90, 270, fill=rgb, width=lw)
+
+    # 四周留一圈透明边：横臂正好压在画布最外一行时，Tk 的行框和降采样都会啃掉
+    # 那一行，看上去就变成"括号只有一竖 + 上面一横"。留边要够一个显示像素
+    # （SUPERSAMPLE 个采样像素），少了等于没留。
+    edge = max(lw, SUPERSAMPLE)
+    padded = Image.new("RGBA", (img.width + edge * 2, img.height + edge * 2), (0, 0, 0, 0))
+    padded.paste(img, (edge, edge))
+    img = padded
 
     if side == "R":
         img = img.transpose(Image.FLIP_LEFT_RIGHT)
@@ -592,7 +590,13 @@ def _render_env(env: str, body: str, px: int, dpi: float, color: str,
         total_w += limg.width + pad
     if rimg is not None:
         total_w += rimg.width + pad
+    # 画布高度必须容得下定界符：括号图本身比 bheight 高一圈（line 有宽度，
+    # 上下各溢出一半），只按 bheight 开画布会把下边那条横臂裁掉，
+    # 看上去就是"括号只剩一竖 + 上面一横"
     total_h = max(content_h, int(round(bheight)))
+    for dimg in (limg, rimg):
+        if dimg is not None:
+            total_h = max(total_h, dimg.height)
 
     canvas = Image.new("RGBA", (max(1, int(total_w)), max(1, total_h)), (0, 0, 0, 0))
     x0 = 0

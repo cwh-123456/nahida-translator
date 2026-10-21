@@ -174,6 +174,11 @@ def taskbar_top() -> int | None:
     return None
 
 
+# 公式高到几倍行高就放弃"塞一行"，改成独占一行居中。
+# 3 行矩阵大约 3.6 倍行高，仍然按行内排；再高（十几行的 aligned）才会走到这里
+BLOCK_LINES = 7.0
+
+
 MODE_TITLES = {
     "auto": "自动识别",
     "translate": "英译中",
@@ -1930,12 +1935,15 @@ class ResultWindow:
                     self.text.insert("end", s)
                 prev_block = False
             else:
+                # 先渲染、并定下"要不要独占一行"，再决定吞不吞后面的标点：
+                # 这两件事必须用同一个判断，否则标点会被摘走却没地方落脚
+                img, block, align = self._prepare_formula(
+                    seg[1], seg[2], px, dpi, linespace)
                 tail = ""
                 nxt = segs[idx + 1] if idx + 1 < len(segs) else None
                 # 独立公式后面紧跟的句号/逗号：摘出来跟着公式行，否则它会
                 # 独自占一行，整段看着像被切碎了
-                if (nxt is not None and nxt[0] == "text"
-                        and (seg[2] or mathrender.is_block(seg[1]))):
+                if block and img is not None and nxt is not None and nxt[0] == "text":
                     # 中文标点后面通常直接接汉字，不能要求后面是空白；
                     # 英文标点则要，免得把 "1.5" 拆开
                     m = re.match(
@@ -1944,36 +1952,57 @@ class ResultWindow:
                         tail = m.group(1)
                         segs[idx + 1] = ("text", nxt[1][m.end():])
                 prev_block = self._insert_formula(
-                    seg[1], seg[2], px, dpi, max_w, linespace, tail)
+                    seg[1], img, block, align, px, max_w, tail)
         self.text.configure(state="disabled")
         self._schedule_fit(force=True)
 
-    def _insert_formula(self, tex: str, display: bool, px: int, dpi: float,
-                        max_w: int, linespace: int, tail: str = "") -> bool:
-        """插一段公式，返回它是否占用了独立一行。
+    def _prepare_formula(self, tex: str, display: bool, px: int, dpi: float,
+                         linespace: int):
+        """渲染公式，并决定怎么摆。返回 (图 | None, block, align)。
 
-        渲染不出来就原样给出 LaTeX 源码并标色，绝不静默吞掉。
+        判据只有三条：
+        - `$$...$$`（模型自己标的独立公式）一律独占一行，这是语义
+        - 高得离谱的（超过 7 行高，比如十几行的 aligned）独占一行
+        - 其余一律行内，能在同一行塞下就塞下
+
+        前两版是"含矩阵就独占一行"，结果「20 [矩阵] 的解为 [矩阵]。」被拆成
+        四行，看着像被刀切过。矩阵只要宽度塞得下，行内排版反而是对的。
+
+        align 分两种：矮公式用 baseline（排版准确，跟中文基线对齐）；
+        高于一行半的用 center。Tk 的图片只能向上溢出，用 baseline 让一个
+        三行矩阵坐在基线上时，同一行的中文会被压到整行的最底下，
+        看起来像掉下去了；center 则是文字在公式侧面居中，读起来正常。
+        """
+        if self.text is None:
+            return None, False, "baseline"
+        color = self.th["fg"]
+        probe = mathrender.render_image(
+            tex, px=px, dpi=dpi, color=color, baseline=False)
+        if probe is None:
+            return None, False, "baseline"
+        if display or probe.height > linespace * BLOCK_LINES:
+            return probe, True, "center"
+        if probe.height > linespace * 1.6:
+            return probe, False, "center"
+        # 行内小公式：补上基线以下的空白，让 align="baseline" 能精确对齐
+        img = mathrender.render_image(tex, px=px, dpi=dpi, color=color)
+        return (img or probe), False, "baseline"
+
+    def _insert_formula(self, tex: str, img, block: bool, align: str, px: int,
+                        max_w: int, tail: str = "") -> bool:
+        """把公式图插进去，返回它是否占用了独立一行。
+
+        `img` 为 None 表示渲染不出来：原样给出 LaTeX 源码并标色，绝不静默吞掉。
         """
         if self.text is None:
             return False
-        color = self.th["fg"]
-        # 先按「内容高度」量一遍：行内图片在 Tk 的 Text 里只能往上溢出，
-        # 一旦公式高于一行（矩阵、堆叠分式），下半截没地方悬挂，文字就会被
-        # 挤到公式底部，看起来整个错位。所以超过约两行高的公式一律当独立公式。
-        img = mathrender.render_image(tex, px=px, dpi=dpi, color=color, baseline=False)
         if img is None:
             self.text.insert("end", " " + tex.strip() + " ", "raw_math")
             return False
 
         from PIL import Image, ImageTk
 
-        block = display or mathrender.is_block(tex) or img.height > linespace * 1.9
-        if not block:
-            # 行内公式绝不拆行：像 \dfrac{\eta}{1-\beta} 这种式子拆走会让
-            # 「……变为」和「，收敛更快」被硬生生分开。这里补上基线以下的
-            # 空白，让 align="baseline" 能跟中文正文对齐。
-            img = mathrender.render_image(tex, px=px, dpi=dpi, color=color) or img
-        elif img.height > linespace * 2.0 and img.height > 240:
+        if block and img.height > 240:
             # 太高的整块公式才缩，普通三行矩阵保持原字号（矩阵要看得清）
             ratio = 240.0 / float(img.height)
             img = img.resize((max(1, int(img.width * ratio)),
@@ -2009,7 +2038,7 @@ class ResultWindow:
                 self.text.insert("end", tail)
             self.text.insert("end", "\n")
             return True
-        self.text.image_create("end", image=photo, align="baseline", padx=1)
+        self.text.image_create("end", image=photo, align=align, padx=1)
         return False
 
     def _set_text(self, value: str) -> None:
