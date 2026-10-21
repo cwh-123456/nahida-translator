@@ -1105,6 +1105,8 @@ class PanelBackground:
         if not self.win.winfo_ismapped():
             self.win.deiconify()
         self._apply_region()
+        # 立刻画第一帧：否则要等第一次 tick（≥70ms），这段时间背景是空白的
+        self._render_now()
         self._schedule()
 
     def sync(self, x: int, y: int, w: int, h: int) -> None:
@@ -1115,7 +1117,8 @@ class PanelBackground:
         if geom == self._geom and self.win.winfo_ismapped():
             return
         self._geom = geom
-        if (w, h) != self._target:
+        resized = (w, h) != self._target
+        if resized:
             self._target = (w, h)
             self._region = None
         try:
@@ -1123,6 +1126,11 @@ class PanelBackground:
         except tk.TclError:
             return
         self._apply_region()
+        # 尺寸一变就必须当场重画帧图：动画 tick 是 ≥70ms 一次，拖动期间还被
+        # pause() 停掉了，等它的话标签里一直是旧尺寸的图——居中放进新窗口，
+        # 就是"背景动图和面板不同步"（流式翻译时面板每 80ms 就可能长高一点）。
+        if resized:
+            self._render_now()
 
     def hide(self) -> None:
         self._cancel()
@@ -1171,7 +1179,18 @@ class PanelBackground:
 
     def resume(self) -> None:
         if self.win is not None and self.win.winfo_ismapped():
+            # 拖动期间尺寸可能变过（流式翻译还在长高），先把帧图对齐再恢复播放
+            self._render_now()
             self._schedule()
+
+    def _render_now(self) -> None:
+        """按当前目标尺寸立刻重画一帧，不等动画 tick。"""
+        if self.win is None or self.label is None or not self._frames:
+            return
+        try:
+            self.label.configure(image=self._render())
+        except tk.TclError:
+            pass
 
     def _schedule(self) -> None:
         self._cancel()
@@ -2208,6 +2227,9 @@ class ResultWindow:
             y = min(self._y, max(4, sh - h - 8))
             self._y = y
             self.win.geometry(f"{self.width}x{h}+{self._x}+{y}")
+            # 命中判断（悬停唤醒 / 单击唤醒）用的是这个缓存，不更新的话
+            # 面板长高之后下半截会被当成"面板外"
+            self._geom_cache = (self._x, y, self.width, h)
             self._toggle_scroll()
             self._apply_round_region()
             self._sync_bg()
@@ -2344,7 +2366,9 @@ class ResultWindow:
         self.win.geometry(f"+{x}+{y}")
         self._x, self._y = x, y
         self._geom_cache = (x, y, self._geom_cache[2], self._geom_cache[3])
-        self._sync_bg_at(x, y)
+        # 用缓存里的尺寸而不是 winfo：拖动时流式翻译还在长高，刚写的 geometry
+        # 可能还没生效，读 winfo 会拿到上一帧的宽高
+        self._sync_bg_at(x, y, self._geom_cache[2], self._geom_cache[3])
 
     def _drag_end(self, _event=None):
         """拖动结束：记住位置，下次点「译」直接回到这里。"""
