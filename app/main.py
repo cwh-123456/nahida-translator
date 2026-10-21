@@ -27,7 +27,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from app import config  # noqa: E402
-from app.engine import EngineError, Translator, has_cjk, is_single_word  # noqa: E402
+from app.engine import Cancel, Cancelled, EngineError, Translator, has_cjk, is_single_word  # noqa: E402
 from app.hotkey import HotkeyManager  # noqa: E402
 from app.selection import SelectionWatcher  # noqa: E402
 from app.shot import RegionSelector, grab_clipboard_image  # noqa: E402
@@ -37,7 +37,7 @@ from app.vision import VisionTranslator  # noqa: E402
 log = logging.getLogger("app")
 
 MODE_CHOICES = ("auto", "translate", "zh2en", "summary", "term")
-BUILD = "2026-10-21.1930"  # 启动日志里会打印，用于确认跑的是新代码
+BUILD = "2026-10-21.2145"  # 启动日志里会打印，用于确认跑的是新代码
 
 MODE_LABELS = {
     "auto": "自动识别",
@@ -161,6 +161,10 @@ class TranslatorApp:
         self.vision = VisionTranslator(cfg)
         self.pending: tuple[str, int, int] = ("", 0, 0)
         self.busy = False
+        # 任务代际：每开一轮翻译 +1。工作线程把 epoch 一起放进事件里，
+        # 面板关掉后新开的那一轮不会被旧线程的结果覆盖。
+        self._epoch = 0
+        self._cancel: Cancel | None = None
         self.paused = bool(cfg.get("pause", False))
         self._shutting_down = False
         self._mutex = None
@@ -182,6 +186,7 @@ class TranslatorApp:
                 panel_gif = candidate
         self.result = ResultWindow(
             self.root, cfg, on_retry=self.retry, on_close=self._save_window_pos,
+            on_dismiss=self._on_panel_dismiss,
             on_mode_click=lambda: self.q.put(("panel_mode_menu",)),
             bg_gif=panel_gif,
         )
@@ -378,6 +383,35 @@ class TranslatorApp:
         except Exception:
             pass
 
+    # ---------------- 任务代际 / 取消 ----------------
+    def _begin_job(self) -> tuple[int, Cancel]:
+        """开一轮新任务，返回 (epoch, 取消信号)。
+
+        上一轮要是还在跑（比如图片识别），先把它取消掉：两轮同时占着同一个
+        llama-server，后来者只会排队等锁，还不如让旧的那轮立刻收手。
+        """
+        if self._cancel is not None and not self._cancel.cancelled():
+            self._cancel.cancel("被新一轮翻译顶掉")
+        self._epoch += 1
+        self._cancel = Cancel()
+        return self._epoch, self._cancel
+
+    def _on_panel_dismiss(self) -> None:
+        """用户关掉了面板（点叉 / Esc）= 不要这个结果了。
+
+        图片识别在 CPU 上要跑十几秒，光把窗口藏起来不够：后台线程会继续跑到底，
+        期间 busy 一直是 True，用户再截图/划词都被拦下，看起来像程序卡死。
+        这里把取消信号发出去，工作线程在下一段流式输出时就会抛出 Cancelled 退出，
+        连接随之关闭，引擎那边也会停。epoch 同时作废，残留事件一律丢弃。
+        """
+        self._epoch += 1
+        if self._cancel is not None and not self._cancel.cancelled():
+            self._cancel.cancel("面板已关闭")
+            log.info("面板被关闭，取消进行中的任务（epoch=%d）", self._epoch)
+        if self.busy:
+            self.busy = False
+            self._tray_title("英译中助手 · 已取消")
+
     @staticmethod
     def _mode_menu_anchor(btn) -> tuple[int, int]:
         if btn is not None:
@@ -561,6 +595,14 @@ class TranslatorApp:
 
     def _handle(self, item: tuple) -> None:
         kind = item[0]
+        # token / status / done / error 都带着投递时的 epoch：面板被关掉或被新一轮
+        # 顶掉之后，旧线程残余的事件必须丢掉，否则会把新面板的内容覆盖成旧结果
+        if kind in ("token", "status", "done", "error"):
+            epoch = item[-1]
+            if isinstance(epoch, int) and epoch != self._epoch:
+                log.debug("丢弃过期任务事件 %s（epoch=%s，当前=%s）",
+                          kind, epoch, self._epoch)
+                return
         if kind == "selection":
             self.pending = (item[1], item[2], item[3])
             if item[4]:  # 快捷键：直接翻译
@@ -711,32 +753,37 @@ class TranslatorApp:
             status = "缺少视觉模型，见下方提示"
         # 图片翻译和划词翻译用同一套纳西妲绿配色，别一会儿白底一会儿绿底
         self.result.set_style("leaf")
+        epoch, cancel = self._begin_job()
         self.result.open(0, 0, origin, status)
-        log.info("开始图片翻译：%s，模式 %s", origin, mode)
+        log.info("开始图片翻译：%s，模式 %s（epoch=%d）", origin, mode, epoch)
         threading.Thread(
-            target=self._worker_image, args=(img, mode), daemon=True
+            target=self._worker_image, args=(img, mode, epoch, cancel), daemon=True
         ).start()
 
-    def _worker_image(self, img, mode: str) -> None:
-        on_token = lambda piece: self.q.put(("token", piece))  # noqa: E731
-        on_status = lambda status: self.q.put(("status", status))  # noqa: E731
+    def _worker_image(self, img, mode: str, epoch: int, cancel: Cancel) -> None:
+        on_token = lambda piece: self.q.put(("token", piece, epoch))  # noqa: E731
+        on_status = lambda status: self.q.put(("status", status, epoch))  # noqa: E731
         try:
             result = self.vision.translate_image(
-                img, mode=mode, on_token=on_token, on_status=on_status
+                img, mode=mode, on_token=on_token, on_status=on_status, cancel=cancel
             )
             if result.text:
-                self.q.put(("done", result, "image"))
+                self.q.put(("done", result, "image", epoch))
             else:
                 self.q.put((
                     "error",
                     "没有从图片里读出内容。可能是图片太模糊、太小，或者框选的区域里没有文字。",
+                    epoch,
                 ))
+        except Cancelled:
+            # 用户自己关掉面板的：不算失败，什么都不用投递
+            log.info("图片翻译已取消（epoch=%d）", epoch)
         except EngineError as exc:
             log.error("图片翻译失败: %s", exc)
-            self.q.put(("error", str(exc)))
+            self.q.put(("error", str(exc), epoch))
         except Exception as exc:  # noqa: BLE001
             log.exception("图片翻译异常")
-            self.q.put(("error", f"图片翻译失败：{exc}"))
+            self.q.put(("error", f"图片翻译失败：{exc}", epoch))
 
     def translate_pending(self) -> None:
         text, x, y = self.pending
@@ -750,8 +797,11 @@ class TranslatorApp:
         if not self.translator.ready:
             status = "正在加载本地模型（首次约 10 秒）…"
         self.result.set_style("leaf")
+        epoch, cancel = self._begin_job()
         self.result.open(x + 4, y + 12, text, status)
-        threading.Thread(target=self._worker, args=(text, mode), daemon=True).start()
+        threading.Thread(
+            target=self._worker, args=(text, mode, epoch, cancel), daemon=True
+        ).start()
 
     def retry(self) -> None:
         if self.busy:
@@ -760,36 +810,48 @@ class TranslatorApp:
         if text:
             self.busy = True
             mode = self._mode_of(text)
+            epoch, cancel = self._begin_job()
             self.result.clear()
             self.result.set_status("正在重新处理…")
-            threading.Thread(target=self._worker, args=(text, mode), daemon=True).start()
+            threading.Thread(
+                target=self._worker, args=(text, mode, epoch, cancel), daemon=True
+            ).start()
 
-    def _worker(self, text: str, mode: str = "translate") -> None:
-        on_token = lambda piece: self.q.put(("token", piece))  # noqa: E731
-        on_status = lambda status: self.q.put(("status", status))  # noqa: E731
+    def _worker(self, text: str, mode: str = "translate",
+                epoch: int = 0, cancel: Cancel | None = None) -> None:
+        on_token = lambda piece: self.q.put(("token", piece, epoch))  # noqa: E731
+        on_status = lambda status: self.q.put(("status", status, epoch))  # noqa: E731
         try:
             if mode == "word":
-                result = self.translator.explain(text, on_token=on_token, on_status=on_status)
+                result = self.translator.explain(
+                    text, on_token=on_token, on_status=on_status, cancel=cancel)
             elif mode == "term":
-                result = self.translator.explain_term(text, on_token=on_token, on_status=on_status)
+                result = self.translator.explain_term(
+                    text, on_token=on_token, on_status=on_status, cancel=cancel)
             elif mode == "summary":
-                result = self.translator.summarize(text, on_token=on_token, on_status=on_status)
+                result = self.translator.summarize(
+                    text, on_token=on_token, on_status=on_status, cancel=cancel)
             elif mode == "zh2en":
                 result = self.translator.translate(
-                    text, on_token=on_token, on_status=on_status, direction="zh2en"
+                    text, on_token=on_token, on_status=on_status,
+                    direction="zh2en", cancel=cancel
                 )
             else:
-                result = self.translator.translate(text, on_token=on_token, on_status=on_status)
+                result = self.translator.translate(
+                    text, on_token=on_token, on_status=on_status, cancel=cancel)
             if result.text:
-                self.q.put(("done", result, mode))
+                self.q.put(("done", result, mode, epoch))
             else:
-                self.q.put(("error", "没有拿到结果，请重试。"))
+                self.q.put(("error", "没有拿到结果，请重试。", epoch))
+        except Cancelled:
+            # 用户关掉面板 / 被新一轮顶掉：安静收工，不弹错误
+            log.info("翻译已取消（epoch=%d）", epoch)
         except EngineError as exc:
             log.error("翻译失败: %s", exc)
-            self.q.put(("error", str(exc)))
+            self.q.put(("error", str(exc), epoch))
         except Exception as exc:  # noqa: BLE001
             log.exception("翻译异常")
-            self.q.put(("error", f"翻译失败：{exc}"))
+            self.q.put(("error", f"翻译失败：{exc}", epoch))
 
     # ---------------- 托盘 ----------------
     def _tray_image(self):

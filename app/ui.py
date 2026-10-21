@@ -1215,12 +1215,13 @@ class ResultWindow:
 
     def __init__(self, root: tk.Tk, cfg: dict, on_retry=None, on_copy=None,
                  on_close=None, on_mode_click=None, bg_gif: str | None = None,
-                 style: str = "leaf"):
+                 style: str = "leaf", on_dismiss=None):
         self.root = root
         self.cfg = cfg
         self.on_retry = on_retry
         self.on_copy = on_copy
         self.on_close = on_close
+        self.on_dismiss = on_dismiss
         self.on_mode_click = on_mode_click
         self._style = style if style in ("leaf", "light") else "leaf"
         self.th = LIGHT if self._style == "light" else LEAF
@@ -2347,6 +2348,13 @@ class ResultWindow:
         self.close()
 
     def close(self) -> None:
+        """关闭面板。用户点叉 / 按 Esc 都会走到这里。
+
+        `on_close` 只负责保存位置，拖动结束时也会调它，所以**不能**拿它判断
+        "用户要结束这次任务"。真正表示"用户不要这个结果了"的是 on_dismiss，
+        这里只调它一次：上层据此取消还在跑的识别/翻译。
+        """
+        was_shown = self._shown
         self._shown = False
         # 取消挂起的重排/重绘：面板关了就不该再有任何回调去动窗口，
         # 否则 _fit() 会在关闭之后再写一次几何和圆角区域，把图层搅乱
@@ -2378,6 +2386,13 @@ class ResultWindow:
         if self.on_close:
             try:
                 self.on_close()
+            except Exception:
+                pass
+        # 只在"本来是开着的"时候通知：close() 可能被重复调用（Esc + 巡检），
+        # 重复通知会让上层把下一轮刚开的任务当成旧的取消掉
+        if was_shown and self.on_dismiss:
+            try:
+                self.on_dismiss()
             except Exception:
                 pass
 

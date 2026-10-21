@@ -19,7 +19,8 @@ import time
 import urllib.request
 
 from . import config
-from .engine import CLEAN_PREFIX, CLEAN_WRAP, CREATE_NO_WINDOW, EngineError, TranslationResult, _OPENER
+from .engine import (CLEAN_PREFIX, CLEAN_WRAP, CREATE_NO_WINDOW, Cancel, Cancelled,
+                     EngineError, TranslationResult, _OPENER)
 
 log = logging.getLogger("vision")
 
@@ -334,7 +335,8 @@ class VisionTranslator:
 
     # ---------------- 请求 ----------------
     def _chat_image(self, data_url: str, system: str, user: str,
-                    on_token=None, max_tokens: int = 1400) -> tuple[str, int]:
+                    on_token=None, max_tokens: int = 1400,
+                    cancel: Cancel | None = None) -> tuple[str, int]:
         payload_messages = [
             {"role": "system", "content": system},
             {
@@ -370,6 +372,10 @@ class VisionTranslator:
             # CPU 推理慢，超时要给足；单张扫描件 15 秒左右，长图可能到两三分钟
             with _OPENER.open(req, timeout=600) as resp:
                 for raw in resp:
+                    # 用户关掉面板后，这里立刻抛出 Cancelled：with 退出即关闭连接，
+                    # llama-server 下一次往这条连接写 token 时会发现对端没了并停下
+                    if cancel is not None:
+                        cancel.check()
                     line = raw.decode("utf-8", "ignore").strip()
                     if not line or not line.startswith("data:"):
                         continue
@@ -389,6 +395,9 @@ class VisionTranslator:
                             on_token(piece)
                     if choice.get("finish_reason"):
                         break
+        except Cancelled:
+            # 用户主动中断：原样抛出，别包成"请求图片识别引擎失败"
+            raise
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "ignore")[:400]
             raise EngineError(f"图片识别失败（{exc.code}）：{detail}") from exc
@@ -397,7 +406,8 @@ class VisionTranslator:
         return "".join(buf), ntok
 
     def translate_image(self, img, mode: str = "translate", on_token=None,
-                        on_status=None, max_side: int | None = None) -> TranslationResult:
+                        on_status=None, max_side: int | None = None,
+                        cancel: Cancel | None = None) -> TranslationResult:
         """把一张图（PIL.Image 或图片路径）翻成中文，公式保留 LaTeX。"""
         from PIL import Image
 
@@ -410,6 +420,8 @@ class VisionTranslator:
         with self._request_lock:
             t0 = time.time()
             self.ensure_server(on_status)
+            if cancel is not None:
+                cancel.check()
             self._last_used = time.time()
             if on_status:
                 on_status("正在识别图片内容（纯 CPU，约 10~30 秒）…")
@@ -426,11 +438,14 @@ class VisionTranslator:
             text, ntok = self._chat_image(
                 data_url, system, user, on_token=on_token,
                 max_tokens=1600 if mode != "summary" else 900,
+                cancel=cancel,
             )
 
             # 只转写没翻译时重来一次。重试不带 on_token：界面上已经流过一版
             # 原文了，再流一版中文会混在一起，不如等结果整体替换。
             if mode == "translate" and looks_untranslated(clean_image_output(text)):
+                if cancel is not None:
+                    cancel.check()
                 log.warning("图片输出中文占比 %.0f%%，判定为只转写未翻译，重试",
                             han_ratio(text) * 100)
                 if on_status:
@@ -439,6 +454,7 @@ class VisionTranslator:
                     data_url, system,
                     "请把这张图片里的英文内容翻译成简体中文，不要照抄原文句子。",
                     max_tokens=1600,
+                    cancel=cancel,
                 )
                 if again:
                     text, ntok = again, ntok + n2

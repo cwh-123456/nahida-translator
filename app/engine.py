@@ -98,6 +98,42 @@ class EngineError(RuntimeError):
     pass
 
 
+class Cancelled(RuntimeError):
+    """任务被用户打断：关掉面板、按 Esc，或者被新任务顶掉。
+
+    单独一个类型而不是复用 EngineError：上层见到它要**静默退出**，
+    不弹错误、不写"失败"状态——是用户自己不要这个结果。
+    """
+
+
+class Cancel:
+    """一次任务的取消信号，跨线程传递（UI 线程 set，工作线程 check）。
+
+    为什么需要它而不只是"不看结果"：图片识别在 CPU 上要跑十几秒到几分钟，
+    用户关掉面板就是想让它停下，而不是换个地方偷偷跑完继续占着 CPU。
+    check() 在流式循环里每收到一段就调一次，一旦取消就抛出 Cancelled，
+    连接随之关闭，llama-server 那边也就停了。
+    """
+
+    __slots__ = ("_event", "reason")
+
+    def __init__(self, reason: str = ""):
+        self._event = threading.Event()
+        self.reason = reason
+
+    def cancel(self, reason: str = "") -> None:
+        if reason:
+            self.reason = reason
+        self._event.set()
+
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def check(self) -> None:
+        if self._event.is_set():
+            raise Cancelled(self.reason or "任务已取消")
+
+
 class TranslationResult:
     __slots__ = ("text", "seconds", "tokens")
 
@@ -276,7 +312,7 @@ class Translator:
         return chunks
 
     def translate(self, text: str, on_token=None, on_status=None,
-                  direction: str = "en2zh") -> TranslationResult:
+                  direction: str = "en2zh", cancel: Cancel | None = None) -> TranslationResult:
         text = (text or "").strip()
         if not text:
             return TranslationResult("", 0.0, 0)
@@ -287,9 +323,11 @@ class Translator:
             out: list[str] = []
             tokens = 0
             for i, chunk in enumerate(pieces):
+                if cancel is not None:
+                    cancel.check()
                 if on_status and len(pieces) > 1:
                     on_status(f"正在翻译…（{i + 1}/{len(pieces)} 段）")
-                part, n = self._translate_one(chunk, on_token, direction)
+                part, n = self._translate_one(chunk, on_token, direction, cancel)
                 tokens += n
                 out.append(part.strip())
             result = "\n\n".join(x for x in out if x).strip()
@@ -306,12 +344,14 @@ class Translator:
                     ],
                     max_tokens=800,
                     temperature=0.2,
+                    cancel=cancel,
                 )
                 tokens += n
                 result = fixed.strip() or result
             return TranslationResult(clean_output(result), time.time() - t0, tokens)
 
-    def _translate_one(self, text: str, on_token=None, direction: str = "en2zh"):
+    def _translate_one(self, text: str, on_token=None, direction: str = "en2zh",
+                       cancel: Cancel | None = None):
         t = self.cfg["translate"]
         if direction == "zh2en":
             system = ZH2EN_PROMPT
@@ -323,9 +363,10 @@ class Translator:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
-        return self._chat(messages, on_token)
+        return self._chat(messages, on_token, cancel=cancel)
 
-    def explain(self, word: str, on_token=None, on_status=None) -> TranslationResult:
+    def explain(self, word: str, on_token=None, on_status=None,
+                cancel: Cancel | None = None) -> TranslationResult:
         """单个单词：输出词典式精确讲解（音标/词性/释义/搭配/例句）。"""
         word = (word or "").strip()
         with self._translate_lock:
@@ -335,10 +376,12 @@ class Translator:
                 {"role": "system", "content": EXPLAIN_PROMPT},
                 {"role": "user", "content": f"单词：{word}"},
             ]
-            text, n = self._chat(messages, on_token, max_tokens=700, temperature=0.3)
+            text, n = self._chat(messages, on_token, max_tokens=700,
+                                 temperature=0.3, cancel=cancel)
             return TranslationResult(clean_output(text), time.time() - t0, n)
 
-    def explain_term(self, term: str, on_token=None, on_status=None) -> TranslationResult:
+    def explain_term(self, term: str, on_token=None, on_status=None,
+                     cancel: Cancel | None = None) -> TranslationResult:
         """术语/词组/缩写解释。"""
         term = (term or "").strip()
         with self._translate_lock:
@@ -348,10 +391,12 @@ class Translator:
                 {"role": "system", "content": TERM_PROMPT},
                 {"role": "user", "content": f"术语：{term}"},
             ]
-            text, n = self._chat(messages, on_token, max_tokens=600, temperature=0.3)
+            text, n = self._chat(messages, on_token, max_tokens=600,
+                                 temperature=0.3, cancel=cancel)
             return TranslationResult(clean_output(text), time.time() - t0, n)
 
-    def summarize(self, text: str, on_token=None, on_status=None) -> TranslationResult:
+    def summarize(self, text: str, on_token=None, on_status=None,
+                  cancel: Cancel | None = None) -> TranslationResult:
         """长文摘要：长文本自动分段摘要后再合并，输出中文要点 + 一句话总结。"""
         text = (text or "").strip()
         if not text:
@@ -366,18 +411,22 @@ class Translator:
                     {"role": "system", "content": SUMMARY_PROMPT},
                     {"role": "user", "content": f"请给下面这段内容做摘要：\n\n{text}"},
                 ]
-                out, n = self._chat(messages, on_token, max_tokens=800, temperature=0.3)
+                out, n = self._chat(messages, on_token, max_tokens=800,
+                                    temperature=0.3, cancel=cancel)
                 total_tokens += n
             else:
                 partials: list[str] = []
                 for i, chunk in enumerate(chunks):
+                    if cancel is not None:
+                        cancel.check()
                     if on_status:
                         on_status(f"正在分块摘要…（{i + 1}/{len(chunks)} 段）")
                     messages = [
                         {"role": "system", "content": SUMMARY_PROMPT},
                         {"role": "user", "content": f"请给下面这段内容做摘要：\n\n{chunk}"},
                     ]
-                    part, n = self._chat(messages, max_tokens=500, temperature=0.3)
+                    part, n = self._chat(messages, max_tokens=500,
+                                         temperature=0.3, cancel=cancel)
                     total_tokens += n
                     partials.append(part.strip())
                 if on_status:
@@ -388,11 +437,13 @@ class Translator:
                     {"role": "user",
                      "content": "下面是一篇长文分段摘要，请合并成一份最终摘要（同样格式，不重复）：\n\n" + joined},
                 ]
-                out, n = self._chat(messages, on_token, max_tokens=800, temperature=0.3)
+                out, n = self._chat(messages, on_token, max_tokens=800,
+                                    temperature=0.3, cancel=cancel)
                 total_tokens += n
             return TranslationResult(clean_output(out), time.time() - t0, total_tokens)
 
-    def _chat(self, messages, on_token=None, max_tokens=None, temperature=None):
+    def _chat(self, messages, on_token=None, max_tokens=None, temperature=None,
+              cancel: Cancel | None = None):
         t = self.cfg["translate"]
         payload = {
             "model": "local",
@@ -417,6 +468,10 @@ class Translator:
         try:
             with _OPENER.open(req, timeout=300) as resp:
                 for raw in resp:
+                    # 每收到一段就查一次取消：用户已经关掉面板的话，
+                    # 这里立刻抛出，with 退出时会关闭连接，服务端随之停止生成
+                    if cancel is not None:
+                        cancel.check()
                     line = raw.decode("utf-8", "ignore").strip()
                     if not line or not line.startswith("data:"):
                         continue
@@ -437,6 +492,9 @@ class Translator:
                             on_token(piece)
                     if choice.get("finish_reason"):
                         break
+        except Cancelled:
+            # 用户主动中断，不是错误：原样往上抛，别包装成 EngineError
+            raise
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "ignore")[:400]
             raise EngineError(f"引擎返回错误 {exc.code}: {detail}") from exc
