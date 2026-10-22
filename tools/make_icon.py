@@ -30,7 +30,7 @@ import sys
 
 from PIL import Image, ImageDraw, ImageFilter
 
-SIZES = (16, 24, 32, 48, 64, 128, 256)
+SIZES = (16, 24, 32, 48, 64, 96, 128, 256)
 RADIUS_RATIO = 0.14  # 圆角半径占边长的比例，接近 Win11 图标观感
 MASTER = 1024        # 先缩到这个尺寸再往小缩，避免反复重采样
 
