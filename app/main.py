@@ -173,6 +173,7 @@ class TranslatorApp:
         self._shotting = False          # 框选截图进行中：钩子线程据此忽略划词
         self._hotkeys = HotkeyManager()
         self._shot_hotkey = ""          # 实际注册成功的截图热键（可能因占用而顺延）
+        self._fullscreen_active = False  # 前台是否处于全屏（据此隐藏 dock/看板娘）
 
         self.root = tk.Tk()
         self.root.withdraw()
@@ -1058,12 +1059,79 @@ class TranslatorApp:
             pass
         return hwnds
 
+    def _foreground_fullscreen(self) -> bool:
+        """前台窗口是否占满整个显示器（进入全屏的视频/游戏）。
+
+        判定：取前台窗口的窗口矩形，和它所在显示器的矩形做比较；边框若
+        铺满该显示器（含无边框全屏），即为全屏。排除桌面、任务栏和我们
+        自己的窗口，避免误判。
+        """
+        try:
+            user32 = ctypes.windll.user32
+            fg = user32.GetForegroundWindow()
+            if not fg:
+                return False
+            if fg in self._our_hwnds():
+                return False
+            # 桌面本身（Progman / WorkerW）不算"进入全屏"
+            cls = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(fg, cls, 64)
+            if cls.value in ("Progman", "WorkerW"):
+                return False
+            # 前台窗口可见性：最小化/隐藏的窗口不判全屏
+            if not user32.IsWindowVisible(fg):
+                return False
+            from ctypes import wintypes
+
+            wr = wintypes.RECT()
+            if not user32.GetWindowRect(fg, ctypes.byref(wr)):
+                return False
+            # 取该窗口所在显示器的工作区矩形（不是整屏，任务栏高度也算进窗口里）
+            mon = user32.MonitorFromWindow(fg, 2)  # MONITOR_DEFAULTTONEAREST
+            if not mon:
+                return False
+
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT),
+                    ("dwFlags", wintypes.DWORD),
+                ]
+
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            if not user32.GetMonitorInfoW(mon, ctypes.byref(mi)):
+                return False
+            ww = wr.right - wr.left
+            wh = wr.bottom - wr.top
+            mw = mi.rcMonitor.right - mi.rcMonitor.left
+            mh = mi.rcMonitor.bottom - mi.rcMonitor.top
+            # 铺满整个显示器（宽高都达到），即全屏。留 2px 容差应对取整。
+            return ww >= mw - 2 and wh >= mh - 2
+        except Exception:
+            return False
+
     def _watch_click_through(self) -> None:
         """面板闲置几秒后自动鼠标穿透：既能始终看见，又不会挡住划词。
 
         用户点「译」或选完文字出结果时会重置 6 秒窗口，这段时间内面板可正常操作。
         """
         try:
+            # 全屏检测：前台进入全屏（视频/游戏）时，藏起常驻的「译」按钮和看板娘，
+            # 退出全屏后按各自的开关状态恢复。看板娘只在用户开启时才重新显示。
+            fs = self._foreground_fullscreen()
+            if fs and not self._fullscreen_active:
+                self._fullscreen_active = True
+                self.dock.hide()
+                if self.mascot is not None:
+                    self.mascot.hide()
+            elif not fs and self._fullscreen_active:
+                self._fullscreen_active = False
+                self.dock.show()
+                if self.mascot is not None and self._mascot_var.get():
+                    self.mascot.show()
+
             ui = self.cfg["ui"]
             manual = bool(ui.get("panel_click_through", False))
             # 兜底不变量：面板不可见时，背景层绝不能单独留在屏幕上
