@@ -1377,7 +1377,10 @@ class ResultWindow:
         self.win: tk.Toplevel | None = None
         self.text: tk.Text | None = None
         self.status: tk.Label | None = None
-        self.source_label: tk.Label | None = None
+        self.source_input: tk.Text | None = None   # 原文：可编辑，用户能改/直接输入
+        self._src_ph = "在此输入要翻译的内容…（Ctrl+回车开始）"
+        self._src_ph_on = False      # 输入框里当前显示的是不是占位提示
+        self._src_focused = False
         self.mode_label: tk.Label | None = None
         self._mode_text = "自动识别"
         self._region_size: tuple[int, int] | None = None
@@ -1478,10 +1481,12 @@ class ResultWindow:
         self.win = None
         self.text = None
         self.status = None
-        self.source_label = None
+        self.source_input = None
         self.mode_label = None
         self.header = None
         self.scroll = None
+        self._src_ph_on = False
+        self._src_focused = False
         self._scroll_shown = False
         self._math_photos = []
         self._resize_strips = {}
@@ -1551,12 +1556,24 @@ class ResultWindow:
         )
 
         if ui.get("show_source", True):
-            self.source_label = tk.Label(
-                body, text="", bg=self.th["bg"], fg=self.th["muted"], anchor="w", justify="left",
-                font=(family, int(ui.get("source_font_size", 9))),
-                wraplength=self.width - 28,
+            # 原文区：可编辑的多行文本框。划词得到的句子会自动填进来，
+            # 用户可以直接改、或删掉后输入自己想翻的内容，点「重译」生效。
+            self.source_input = tk.Text(
+                body, bg=self.th["bg"], fg=self.th["fg"], bd=0, highlightthickness=0,
+                wrap="word", font=(family, int(ui.get("source_font_size", 9))),
+                height=1, padx=4, pady=2, cursor="xterm",
+                insertbackground=self.th["accent"], selectbackground=self.th["select"],
+                spacing1=1, spacing2=1,
             )
-            self.source_label.pack(fill="x", padx=12, pady=(8, 6))
+            self.source_input.pack(fill="x", padx=8, pady=(8, 6))
+            # 空面板时给一句灰字提示，让用户知道这里可以打字；一聚焦就清掉。
+            self.source_input.tag_configure("ph", foreground=self.th["muted"])
+            # 只有 Ctrl+回车才翻译：普通回车必须留给换行（原文是多行的）
+            self.source_input.bind("<Control-Return>", self._on_source_return)
+            self.source_input.bind("<FocusIn>", self._on_source_focus_in)
+            self.source_input.bind("<FocusOut>", self._on_source_focus_out)
+            # 兜底：万一没收到 FocusIn，敲第一个键时也把灰字清掉
+            self.source_input.bind("<KeyPress>", self._on_source_key)
 
         tk.Frame(body, bg=self.th["rule"], height=1).pack(fill="x", padx=12)
 
@@ -2069,8 +2086,8 @@ class ResultWindow:
             self._build()
         self._cancel_verify()
         self._source = ""
-        if self.source_label is not None:
-            self.source_label.configure(text="")
+        if self.source_input is not None:
+            self._set_source_text("")
         self._set_text("")
         self.set_status("就绪 · 选中后点「译」或按 Ctrl+Alt+T")
         w = self.width
@@ -2114,11 +2131,8 @@ class ResultWindow:
         self._cancel_verify()
         was_visible = self.visible()
         self._source = source
-        if self.source_label is not None:
-            snippet = " ".join(source.split())
-            if len(snippet) > 90:
-                snippet = snippet[:90] + "…"
-            self.source_label.configure(text=snippet)
+        if self.source_input is not None:
+            self._set_source_text(source)
         self._set_text("")
         self.set_status(status)
         w = self.width
@@ -2161,6 +2175,128 @@ class ResultWindow:
 
     def set_source(self, source: str) -> None:
         self._source = source
+        if self.source_input is not None:
+            self._set_source_text(source)
+
+    def _set_source_text(self, text: str) -> None:
+        """把原文写进输入框。用户随后可以改，也可以整段换成别的内容。"""
+        w = self.source_input
+        if w is None:
+            return
+        self._src_ph_on = False
+        w.delete("1.0", "end")
+        if text:
+            w.insert("1.0", text)
+        # 光标放到末尾：划词得到的句子通常是"接着改"，不是从头改
+        w.mark_set("insert", "end-1c")
+        self._fit_source_height(text)
+        if not text and not self._src_focused:
+            self._show_source_placeholder()
+
+    def _source_display_lines(self, text: str) -> int:
+        """估算这段文字在输入框里会占几行（按真实字体宽度折算换行）。"""
+        try:
+            font = tkfont.Font(font=self.source_input.cget("font"))
+            avail = max(80, self.width - 36)   # 左右 padding + 面板留白
+            n = 0
+            for para in (text or "").split("\n"):
+                w = font.measure(para if para else " ")
+                n += max(1, -(-w // avail))    # 向上取整
+            return max(1, n)
+        except Exception:
+            return max(1, (text or "").count("\n") + 1)
+
+    def _fit_source_height(self, text: str) -> None:
+        """按内容行数撑高原文框（上限 5 行，再多就在框内滚动）。"""
+        if self.source_input is None:
+            return
+        try:
+            n = self._source_display_lines(text)
+            self.source_input.configure(height=max(1, min(n, 5)))
+        except tk.TclError:
+            pass
+
+    def _show_source_placeholder(self) -> None:
+        w = self.source_input
+        if w is None or not self._src_ph or self._src_ph_on:
+            return
+        if w.get("1.0", "end-1c"):
+            return
+        w.insert("1.0", self._src_ph)
+        w.tag_add("ph", "1.0", "end")
+        self._src_ph_on = True
+
+    def _clear_source_placeholder(self) -> None:
+        w = self.source_input
+        if w is None or not self._src_ph_on:
+            return
+        w.delete("1.0", "end")
+        self._src_ph_on = False
+
+    def _on_source_focus_in(self, _event=None) -> None:
+        self._src_focused = True
+        # 一聚焦就把灰字清掉，否则用户得先手动删一遍才能输入
+        self._clear_source_placeholder()
+
+    def _on_source_key(self, _event=None) -> None:
+        """任意按键上前再清一次灰字（返回 None，让这一键正常落到文本框）。"""
+        if self._src_ph_on:
+            self._clear_source_placeholder()
+        return None
+
+    def _on_source_focus_out(self, _event=None) -> None:
+        self._src_focused = False
+        w = self.source_input
+        if w is None:
+            return
+        if not w.get("1.0", "end-1c").strip():
+            self._clear_source_placeholder()
+            self._show_source_placeholder()
+
+    def get_source(self) -> str:
+        """读取原文框里当前的内容（用户可能改过，也可能整段换掉）。"""
+        w = self.source_input
+        if w is None:
+            return self._source
+        if self._src_ph_on:
+            # 光看标志位不够：输入法直接送字、程序化填字都可能绕过焦点事件。
+            # 只有框里确实还是那句灰字才当成空，否则按真实内容读。
+            try:
+                if w.get("1.0", "end-1c") == self._src_ph:
+                    return ""
+            except tk.TclError:
+                return ""
+            self._src_ph_on = False
+        try:
+            return w.get("1.0", "end-1c").strip()
+        except tk.TclError:
+            return self._source
+
+    def focus_source(self, force: bool = False) -> None:
+        """把光标送进原文框（用户点「译」/托盘叫出空面板时用）。
+
+        force=True 时连窗口焦点一起抢过来：面板平时故意不抢焦点，
+        但用户是特意点开它来打字的，这一下抢焦点才符合预期。
+        """
+        if self.source_input is None:
+            return
+        try:
+            if force and self.win is not None:
+                self.win.focus_force()
+            self._clear_source_placeholder()
+            self.source_input.focus_set()
+            self.source_input.mark_set("insert", "end-1c")
+        except tk.TclError:
+            pass
+
+    def _on_source_return(self, _event=None):
+        """原文框里按 Ctrl+回车：用当前内容重译一次。"""
+        if self.on_retry:
+            try:
+                self.on_retry()
+            except Exception:
+                pass
+        return "break"
 
     def append(self, piece: str) -> None:
         if self.text is None:

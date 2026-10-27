@@ -161,6 +161,10 @@ class TranslatorApp:
         self.vision = VisionTranslator(cfg)
         self.pending: tuple[str, int, int] = ("", 0, 0)
         self.busy = False
+        # 面板当前显示的是不是图片翻译的结果。图片没有"原文"可改，
+        # 点重译要把这种情形挡掉（否则会把"截图 800×600"当句子送去翻）。
+        self._image_mode = False
+        self._image_origin = ""
         # 任务代际：每开一轮翻译 +1。工作线程把 epoch 一起放进事件里，
         # 面板关掉后新开的那一轮不会被旧线程的结果覆盖。
         self._epoch = 0
@@ -389,11 +393,13 @@ class TranslatorApp:
         except Exception:
             pass
 
-    def _show_window(self, first: bool = False) -> None:
+    def _show_window(self, first: bool = False, focus_source: bool = False) -> None:
         """显示（或重新叫出）翻译面板；没有内容时显示空面板。
 
         first=True 表示程序刚启动：固定出现在屏幕右侧；
         其余情况（点「译」、托盘打开）沿用上次记住的位置。
+        focus_source=True：用户是特意点开的，把光标直接放进原文框，
+        这样不用先点一下输入框就能打字（启动时传 False，不抢焦点）。
         """
         if self.result.visible():
             # 面板已经开着：只把它和背景层抬到最前，不要重建内容
@@ -401,8 +407,11 @@ class TranslatorApp:
             return
         pos = None if first else self.cfg.get("ui", {}).get("window_pos")
         self.result.show_empty(pos=tuple(pos) if pos else None)
+        self._image_mode = False   # 空面板里没有图片原文，重译走普通文本
         self.result.set_mode(self.mode)
         self.result.set_status(self._ready_status())
+        if focus_source:
+            self.result.focus_source(force=True)
 
     def _save_window_pos(self) -> None:
         try:
@@ -654,13 +663,15 @@ class TranslatorApp:
         elif kind == "panel_hover":
             self._apply_panel_hover()
         elif kind == "show_window":
-            self._show_window()
+            self._show_window(focus_source=True)
         elif kind == "dock_click":
             log.info("点击常驻按钮：面板可见=%s", self.result.visible())
             if self.result.visible():
+                # 面板已经开着（里面通常有译文）：只抬到最前，不抢键盘焦点，
+                # 免得用户正在别处打字时被拽过来
                 self.result._raise_self()
             else:
-                self._show_window()
+                self._show_window(focus_source=True)
         elif kind == "panel_mode_menu":
             self._show_panel_mode_menu()
         elif kind == "dock_mode_popup":
@@ -783,6 +794,8 @@ class TranslatorApp:
             mode = "translate"
         self.busy = True
         self.pending = ("", 0, 0)
+        self._image_mode = True
+        self._image_origin = origin
         if self.vision.available():
             status = "正在识别图片（纯 CPU，约 10~30 秒）…"
         else:
@@ -828,6 +841,7 @@ class TranslatorApp:
         if self.busy:
             return
         self.busy = True
+        self._image_mode = False
         mode = self._mode_of(text)
         status = MODE_PENDING.get(mode, "正在翻译…")
         if not self.translator.ready:
@@ -842,16 +856,31 @@ class TranslatorApp:
     def retry(self) -> None:
         if self.busy:
             return
-        text, _x, _y = self.pending
-        if text:
-            self.busy = True
-            mode = self._mode_of(text)
-            epoch, cancel = self._begin_job()
-            self.result.clear()
-            self.result.set_status("正在重新处理…")
-            threading.Thread(
-                target=self._worker, args=(text, mode, epoch, cancel), daemon=True
-            ).start()
+        # 原文以输入框里的内容为准：用户可能改过划词得到的句子，
+        # 也可能是点开空面板后自己敲进去的一段文字。
+        text = self.result.get_source()
+        if not text:
+            # 空输入不猜、也不偷偷退回上一次的原文：直接提示，并把光标送进输入框
+            self.result.set_status("请先在原文框里输入要翻译的内容")
+            self.result.focus_source(force=True)
+            return
+        if self._image_mode and text == self._image_origin:
+            # 图片翻译的"原文"只是一句说明，不是可译的句子
+            self.result.set_status("图片翻译不能改原文重译，请重新截图框选")
+            return
+        self._image_mode = False
+        self.pending = (text, self.pending[1], self.pending[2])
+        self.busy = True
+        mode = self._mode_of(text)
+        status = MODE_PENDING.get(mode, "正在翻译…")
+        if not self.translator.ready:
+            status = "正在加载本地模型（首次约 10 秒）…"
+        epoch, cancel = self._begin_job()
+        self.result.clear()
+        self.result.set_status(status)
+        threading.Thread(
+            target=self._worker, args=(text, mode, epoch, cancel), daemon=True
+        ).start()
 
     def _worker(self, text: str, mode: str = "translate",
                 epoch: int = 0, cancel: Cancel | None = None) -> None:
