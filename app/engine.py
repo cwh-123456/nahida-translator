@@ -94,6 +94,60 @@ def has_cjk(text: str) -> bool:
     return any("\u4e00" <= ch <= "\u9fff" for ch in (text or ""))
 
 
+# 判"词粘在一起"用的：连续 12+ 个字母、中间没有任何空格
+_LONG_RUN = re.compile(r"[A-Za-z]{12,}")
+
+
+def looks_glued(text: str) -> bool:
+    """这段英文是不是丢空格了（从 PDF 复制常见：词与词之间没有空格）。
+
+    只在"一眼就该有空格却没有"时才返回 True：字母够多、空格少得离谱、
+    而且确实有好几段长到不可能是正常单词的连写。代码、URL、单个长单词
+    都会因为不满足这些条件被放过。
+    """
+    text = (text or "").strip()
+    if not text:
+        return False
+    letters = sum(1 for ch in text if ch.isascii() and ch.isalpha())
+    if letters < 30:
+        return False
+    # 正常英文的空格约占字母的 15%；低于 8% 就明显不对劲了
+    spaces = len(text) - len(text.replace(" ", ""))
+    if spaces >= letters * 0.08:
+        return False
+    # 正常英文里不该出现的"单词"：一串没法当单词看的连写。
+    # 有标点时判得宽一点（整句粘连几乎一定带标点）；没标点时只认"整段就是
+    # 一串小写字母"——驼峰命名（代码里的长函数名）会被这条排除掉。
+    runs = _LONG_RUN.findall(text)
+    if re.search(r"[.,;:!?，。；：！？]", text):
+        ok = len(runs) >= 2 or any(
+            len(r) >= 20 and sum(1 for ch in r if ch.isupper()) <= 2 for r in runs)
+    else:
+        ok = any(
+            len(r) >= 25 and sum(1 for ch in r if ch.isupper()) <= 1 for r in runs)
+    if not ok:
+        return False
+    # 下划线和花括号是代码特征；中文段落也不需要补空格
+    if text.count("_") > 1 or "{" in text or "}" in text:
+        return False
+    if has_cjk(text):
+        return False
+    return True
+
+
+def _squeeze(text: str) -> str:
+    """去掉所有空白，用来校验"只加了空格、没改内容"。"""
+    return "".join((text or "").split())
+
+
+SPACE_FIX_PROMPT = (
+    "你是英文分词修复工具。用户给的文本是从 PDF 复制出来的，单词之间的空格丢失了。"
+    "请只在需要的位置补上空格，让句子恢复成正常英文。"
+    "严禁改动任何字母、数字、标点、大小写，严禁翻译、解释、加引号或换行。"
+    "只输出修复后的原文本身。"
+)
+
+
 class EngineError(RuntimeError):
     pass
 
@@ -349,6 +403,50 @@ class Translator:
                 tokens += n
                 result = fixed.strip() or result
             return TranslationResult(clean_output(result), time.time() - t0, tokens)
+
+    def restore_spaces(self, text: str, on_status=None,
+                       cancel: Cancel | None = None) -> str:
+        """把丢空格的英文补回空格（只加空格，绝不改内容）。
+
+        模型输出和原文"去掉所有空白后"不完全一致时，宁可原样返回——补空格是
+        锦上添花，改坏原文才是事故。所以这一步永远不会让译文变差。
+        """
+        text = (text or "").strip()
+        if not text:
+            return text
+        # 上下文只有 4096：超长选区塞进去会把译文挤掉，宁可不还原（翻译本身会分段）
+        if len(text) > 1800:
+            log.info("原文 %d 字符且缺空格，超过还原上限，跳过", len(text))
+            return text
+        with self._translate_lock:
+            self.ensure_server(on_status)
+            if on_status:
+                on_status("原文缺少空格，正在还原…")
+            try:
+                out, _ = self._chat(
+                    [
+                        {"role": "system", "content": SPACE_FIX_PROMPT},
+                        {"role": "user", "content": text},
+                    ],
+                    max_tokens=min(2600, len(text) * 2 + 128),
+                    temperature=0.0,
+                    cancel=cancel,
+                )
+            except Cancelled:
+                raise
+            except EngineError as exc:
+                log.warning("还原空格失败，按原文继续：%s", exc)
+                return text
+        fixed = (out or "").strip().strip('"').strip()
+        if not fixed or fixed == text:
+            return text
+        if "\n" in fixed and "\n" not in text:
+            fixed = " ".join(fixed.split())
+        if _squeeze(fixed) != _squeeze(text):
+            log.warning("还原空格的结果和原文对不上（模型动了内容），已丢弃")
+            return text
+        log.info("已还原原文空格：%d -> %d 字符", len(text), len(fixed))
+        return fixed
 
     def _translate_one(self, text: str, on_token=None, direction: str = "en2zh",
                        cancel: Cancel | None = None):

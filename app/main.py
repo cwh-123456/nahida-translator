@@ -27,7 +27,9 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from app import config  # noqa: E402
-from app.engine import Cancel, Cancelled, EngineError, Translator, has_cjk, is_single_word  # noqa: E402
+from app.engine import (  # noqa: E402
+    Cancel, Cancelled, EngineError, Translator, has_cjk, is_single_word, looks_glued,
+)
 from app.hotkey import HotkeyManager  # noqa: E402
 from app.selection import SelectionWatcher  # noqa: E402
 from app.shot import RegionSelector, grab_clipboard_image  # noqa: E402
@@ -37,7 +39,7 @@ from app.vision import VisionTranslator  # noqa: E402
 log = logging.getLogger("app")
 
 MODE_CHOICES = ("auto", "translate", "zh2en", "summary", "term")
-BUILD = "2026-10-21.2145"  # 启动日志里会打印，用于确认跑的是新代码
+BUILD = "2026-10-27.2200"  # 启动日志里会打印，用于确认跑的是新代码
 
 MODE_LABELS = {
     "auto": "自动识别",
@@ -640,7 +642,7 @@ class TranslatorApp:
         kind = item[0]
         # token / status / done / error 都带着投递时的 epoch：面板被关掉或被新一轮
         # 顶掉之后，旧线程残余的事件必须丢掉，否则会把新面板的内容覆盖成旧结果
-        if kind in ("token", "status", "done", "error"):
+        if kind in ("token", "status", "done", "error", "source"):
             epoch = item[-1]
             if isinstance(epoch, int) and epoch != self._epoch:
                 log.debug("丢弃过期任务事件 %s（epoch=%s，当前=%s）",
@@ -698,6 +700,10 @@ class TranslatorApp:
                 self.result.close()
         elif kind == "status":
             self.result.set_status(item[1])
+        elif kind == "source":
+            # 原文被"空格还原"改过了：把面板里的原文一起换掉，用户看到的就是修好的句子
+            self.pending = (item[1], self.pending[1], self.pending[2])
+            self.result.set_source(item[1])
         elif kind == "token":
             self.result.append(item[1])
         elif kind == "done":
@@ -882,11 +888,33 @@ class TranslatorApp:
             target=self._worker, args=(text, mode, epoch, cancel), daemon=True
         ).start()
 
+    def _restore_source_if_glued(self, text: str, epoch: int, on_status, cancel) -> str:
+        """PDF 复制常见的"词粘成一团"：翻译前先把空格补回来，并同步到面板。
+
+        只在检测到确实粘连时才做（见 engine.looks_glued），正常文本零开销。
+        还原失败或模型动了内容时 engine 会原样返回，这里不需要兜底。
+        """
+        if not looks_glued(text):
+            return text
+        try:
+            fixed = self.translator.restore_spaces(
+                text, on_status=on_status, cancel=cancel)
+        except Cancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 补空格失败不能拖累翻译
+            log.warning("还原原文空格出错，按原文继续：%s", exc)
+            return text
+        if fixed and fixed != text:
+            self.q.put(("source", fixed, epoch))
+            return fixed
+        return text
+
     def _worker(self, text: str, mode: str = "translate",
                 epoch: int = 0, cancel: Cancel | None = None) -> None:
         on_token = lambda piece: self.q.put(("token", piece, epoch))  # noqa: E731
         on_status = lambda status: self.q.put(("status", status, epoch))  # noqa: E731
         try:
+            text = self._restore_source_if_glued(text, epoch, on_status, cancel)
             if mode == "word":
                 result = self.translator.explain(
                     text, on_token=on_token, on_status=on_status, cancel=cancel)
