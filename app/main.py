@@ -39,7 +39,7 @@ from app.vision import VisionTranslator  # noqa: E402
 log = logging.getLogger("app")
 
 MODE_CHOICES = ("auto", "translate", "zh2en", "summary", "term")
-BUILD = "2026-10-27.2200"  # 启动日志里会打印，用于确认跑的是新代码
+BUILD = "2026-10-28.1525"  # 启动日志里会打印，用于确认跑的是新代码
 
 MODE_LABELS = {
     "auto": "自动识别",

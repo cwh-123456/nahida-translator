@@ -141,10 +141,20 @@ def _squeeze(text: str) -> str:
 
 
 SPACE_FIX_PROMPT = (
-    "你是英文分词修复工具。用户给的文本是从 PDF 复制出来的，单词之间的空格丢失了。"
-    "请只在需要的位置补上空格，让句子恢复成正常英文。"
-    "严禁改动任何字母、数字、标点、大小写，严禁翻译、解释、加引号或换行。"
-    "只输出修复后的原文本身。"
+    "你是英文分词修复工具。用户给的英文是从 PDF 复制出来的，单词之间甚至单词内部的"
+    "空格全部丢失了，成了一串连写。请把空格准确补回去，让文本恢复成正常英文。规则：\n"
+    "1. 只补空格，严禁改动、增删任何字母、数字、标点或大小写；严禁翻译、解释、加引号或换行。\n"
+    "2. 数学和学术文本里的单字母变量（如 A、U、b、x、j、k）一律单独成词，"
+    "不要和相邻单词粘在一起。\n"
+    "3. 数学表达式内部按原样保留，不要为了断词去拆数字和符号，例如 1,...,j 保持原样。\n"
+    "示例：\n"
+    "输入：EachrowofUisthecorrespondingeigenvectorofA\n"
+    "输出：Each row of U is the corresponding eigenvector of A\n"
+    "输入：ThematrixAisinvertibleifandonlyifthedeterminantofAisnonzero\n"
+    "输出：The matrix A is invertible if and only if the determinant of A is nonzero\n"
+    "输入：Letv1,...,vnbeabasisofRn\n"
+    "输出：Let v1,...,vn be a basis of R n\n"
+    "只输出修复后的文本本身，不要任何说明。"
 )
 
 
