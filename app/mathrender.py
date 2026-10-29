@@ -46,7 +46,9 @@ _WS = re.compile(r"\s+")
 # 带一个 LaTeX 命令 / 上标 / 下标 / 花括号 / 等号，或者干脆就是个短符号（$S$、$x$）
 _MATHISH = re.compile(r"[\\^_{}=]")
 _CJK = re.compile(r"[\u2e80-\u9fff\uff00-\uffef\u3000-\u303f]")
-_BARE_SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9]?")
+# 光秃秃的短内容也算公式：单字母变量 $S$、纯数字 $1$、单个符号 $=$。
+# 价格 "$5 和 $10" 里夹着中文，先被上面的 _CJK 挡掉，不会走到这里。
+_BARE_SYMBOL = re.compile(r"[A-Za-z][A-Za-z0-9]?|\d+(?:\.\d+)?|[^\w\s]{1,2}")
 
 # mathtext 缺的几个常见别名：\ge、\le 这类简写它不认，\implies / \iff / \land
 # 更是直接报错。模型输出里这些出现频率很高，一路映射到 mathtext 认识的名字。
@@ -161,19 +163,94 @@ def has_math(text: str) -> bool:
     return bool(text) and _PATTERN.search(text) is not None
 
 
+# 落在公式**外面**的 LaTeX 命令，文本层是按普通文字画的，源码会原样显示出来。
+# 视觉模型特别喜欢把公式切碎（`(A^{-1}` 单独成图），间距命令 `\quad` 就掉在
+# 文本段里，用户看到的是字面的反斜杠命令。这些正则负责把残渣捡干净。
+_TIDY_TEXT_ARG = re.compile(
+    r"\\(?:text|textrm|textnormal|textbf|textit|mathrm|mathbf|mathit|mathsf"
+    r"|mathtt|mbox|operatorname)\s*\{([^{}]*)\}"
+)
+_TIDY_SPACE = re.compile(
+    r"\\(?:q?quad|qquad|hspace\*?\s*\{[^{}]*\}|hfill|hss|thinspace|medspace"
+    r"|thickspace|enspace|negthinspace|,|;|:|!| )"
+)
+_TIDY_CMD = re.compile(r"\\[A-Za-z]+\*?")
+_TIDY_RUN = re.compile(r"[ \t]{2,}")
+
+# 漏到文本段里的命令不能一删了之：\neq 删掉就把「i ≠ j」变成「i j」，
+# 语义直接反了。常见的数学符号在这里映射成 Unicode，实在不认识的才丢。
+_TIDY_UNICODE = {
+    "neq": "≠", "ne": "≠", "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥",
+    "approx": "≈", "equiv": "≡", "sim": "∼", "propto": "∝",
+    "cdot": "·", "times": "×", "div": "÷", "ast": "∗",
+    "pm": "±", "mp": "∓", "infty": "∞",
+    "to": "→", "rightarrow": "→", "leftarrow": "←", "gets": "←",
+    "Rightarrow": "⇒", "implies": "⇒", "Leftarrow": "⇐",
+    "Leftrightarrow": "⇔", "iff": "⇔", "mapsto": "↦",
+    "sum": "∑", "prod": "∏", "int": "∫", "partial": "∂", "nabla": "∇",
+    "in": "∈", "notin": "∉", "subset": "⊂", "subseteq": "⊆",
+    "supset": "⊃", "cup": "∪", "cap": "∩", "emptyset": "∅",
+    "forall": "∀", "exists": "∃", "neg": "¬", "land": "∧", "lor": "∨",
+    "angle": "∠", "perp": "⊥", "parallel": "∥", "degree": "°", "circ": "∘",
+    "prime": "′", "cdots": "⋯", "ldots": "…", "dots": "…",
+    "vdots": "⋮", "ddots": "⋱",
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ",
+    "epsilon": "ε", "varepsilon": "ε", "zeta": "ζ", "eta": "η",
+    "theta": "θ", "iota": "ι", "kappa": "κ", "lambda": "λ", "mu": "μ",
+    "nu": "ν", "xi": "ξ", "pi": "π", "rho": "ρ", "sigma": "σ",
+    "tau": "τ", "upsilon": "υ", "phi": "φ", "varphi": "φ", "chi": "χ",
+    "psi": "ψ", "omega": "ω",
+    "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ",
+    "Pi": "Π", "Sigma": "Σ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
+}
+_TIDY_SYMBOL = re.compile(
+    r"\\(" + "|".join(sorted(_TIDY_UNICODE, key=len, reverse=True)) + r")(?![A-Za-z])"
+)
+
+
+def tidy_text(s: str) -> str:
+    """清理掉进纯文本段的 LaTeX 残渣：间距命令、\\text{...}、孤立的 $$。
+
+    只动"有反斜杠命令或 $$"的文本，正常中文段落原样返回。
+    `\\text{row }` 这种取花括号里的内容（`row `），数学符号转成 Unicode
+    （`\\neq` → `≠`），其余识别不了的命令才删——文本段里出现命令本身就是
+    模型切分失误，但能救回符号就别丢。
+    """
+    if not s or ("\\" not in s and "$$" not in s):
+        return s
+    s = _TIDY_TEXT_ARG.sub(lambda m: m.group(1), s)
+    s = _TIDY_SPACE.sub(" ", s)
+    s = _TIDY_SYMBOL.sub(lambda m: _TIDY_UNICODE[m.group(1)], s)
+    s = s.replace("\\\\", " ")
+    s = s.replace("\\{", "{").replace("\\}", "}").replace("\\%", "%")
+    s = s.replace("\\$", "$").replace("\\_", "_").replace("\\&", "&")
+    s = _TIDY_CMD.sub("", s)
+    s = s.replace("$$", "")
+    s = _TIDY_RUN.sub(" ", s)
+    return s
+
+
 def split_segments(text: str) -> list[tuple]:
     """切成 [("text", 字符串) | ("math", 公式, 是否独立公式)]。
 
     切分只做一次，渲染和插入都基于它，保证两边看到的是同一份结构。
+    文本段在这里顺手过一遍 tidy_text：模型把公式切碎时，`\\quad` 之类的
+    命令会漏到公式外面，让它在源码层就被清掉，比在每个调用方各修一遍可靠。
     """
     out: list[tuple] = []
+
+    def add_text(s: str) -> None:
+        s = tidy_text(s)
+        if s:
+            out.append(("text", s))
+
     pos = 0
     while True:
         m = _PATTERN.search(text, pos)
         if m is None:
             break
         if m.start() > pos:
-            out.append(("text", text[pos:m.start()]))
+            add_text(text[pos:m.start()])
         if m.group("d1") is not None:
             body, display = m.group("d1"), True
         elif m.group("d2") is not None:
@@ -185,13 +262,20 @@ def split_segments(text: str) -> list[tuple]:
         if _looks_math(body):
             out.append(("math", body, display))
             pos = m.end()
+        elif m.group("d1") is not None or m.group("d2") is not None:
+            # $$...$$ / \[...\] 是模型明确标的独立公式，但里面塞了中文：
+            # mathtext 排不了 CJK，整段渲染必然失败。这时把标记连同内容
+            # 一起当文本收下（tidy 会剥掉 \text 外壳），而不是逐字符吐出
+            # 一堆孤立的 $——那样用户看到的是两排美元符号。
+            add_text(body)
+            pos = m.end()
         else:
             # 不像公式（例如 "$5 和 $10"）：只把开头的分隔符当普通文字吐出来，
             # 从它后面重新扫，别把后面真正的公式一起吞掉
             out.append(("text", text[m.start()]))
             pos = m.start() + 1
     if pos < len(text):
-        out.append(("text", text[pos:]))
+        add_text(text[pos:])
     return out
 
 

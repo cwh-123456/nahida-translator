@@ -2338,13 +2338,17 @@ class ResultWindow:
 
     # ---------- 文字 + 公式混排 ----------
     def _set_rich(self, value: str) -> None:
-        self._plain = value or ""
+        value = value or ""
+        if not mathrender.has_math(value):
+            # 没有公式标记时这一整段都按普通文字画，模型漏出来的 \quad、
+            # \text{} 会原样变成源码。这里是最后一道关，顺手清掉。
+            value = mathrender.tidy_text(value)
+        self._plain = value
         if self.text is None:
             return
-        if not value or not mathrender.has_math(value):
+        if not mathrender.has_math(value):
             self._set_text(value)
             return
-
         ui = self.cfg["ui"]
         family = ui.get("font_family", "Microsoft YaHei UI")
         size = int(ui.get("font_size", 11))

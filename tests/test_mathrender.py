@@ -132,6 +132,59 @@ def check_delims() -> bool:
     return ok
 
 
+def check_text_leak() -> bool:
+    """模型把公式切碎时，LaTeX 命令会漏到纯文本段，文本层会原样显示成源码。
+
+    视觉模型尤其爱这么干：`\\quad` 当分隔符、`\\text{}` 装中文、中文塞进
+    `$$...$$`。文本段里任何反斜杠对用户都是 bug，这里逐个钉住。
+    """
+    ok = True
+
+    def texts_of(s: str) -> list[str]:
+        return [seg[1] for seg in mathrender.split_segments(s) if seg[0] == "text"]
+
+    def math_of(s: str) -> list[str]:
+        return [seg[1] for seg in mathrender.split_segments(s) if seg[0] == "math"]
+
+    # 1) 间距命令落在公式外 -> 清掉，不能剩反斜杠
+    t = "".join(texts_of(r"$=1$ \quad ($A$ 的第 $j$ 列)"))
+    good = "\\" not in t
+    print(f"  {'✓' if good else '✗'} \\quad 泄漏      文本 = {t!r}")
+    ok = ok and good
+
+    # 2) \neq 漏出来要变成 ≠：直接删掉会把「i ≠ j」读成「i j」，语义反了
+    t = "".join(texts_of(r"（当 $i$ 行）\neq （$j$ 列）"))
+    good = "≠" in t and "\\" not in t
+    print(f"  {'✓' if good else '✗'} \\neq 转换     文本 = {t!r}")
+    ok = ok and good
+
+    # 3) 中文塞进 $$...$$ -> 整段降级成可读文本，不许出现孤立 $ 和 \text
+    t = "".join(texts_of(r"$$(A^{-1}\text{的第 }i\text{ 行}) = 1$$"))
+    good = "$" not in t and "\\" not in t and "的第" in t
+    print(f"  {'✓' if good else '✗'} 中文 $$ 块      文本 = {t!r}")
+    ok = ok and good
+
+    # 4) 纯数字 $1$ / $0$ 要当公式，否则会显示成字面的 "$1$"
+    m = math_of("（$A^{-1}$ 的第 $i$ 行）= $1$；（$A$ 的第 $j$ 列）= $0$")
+    good = m.count("1") == 1 and m.count("0") == 1
+    print(f"  {'✓' if good else '✗'} 数字公式      {m}")
+    ok = ok and good
+
+    # 5) 正常便宜价格不能被当成公式（回归）
+    m = math_of("价格是 $5 和 $10，而 $S$ 是矩阵")
+    good = m == ["S"]
+    print(f"  {'✓' if good else '✗'} 价格不误判    {m}")
+    ok = ok and good
+
+    # 6) 没有反斜杠的普通中文段落原样返回
+    plain = "这就是一段普通的中文，含 A 和 B 两个变量。"
+    good = mathrender.tidy_text(plain) == plain
+    print(f"  {'✓' if good else '✗'} 普通文本不变   {good}")
+    ok = ok and good
+
+    return ok
+
+
 def main() -> int:
     ok = 0
     for i, (name, tex) in enumerate(CASES):
@@ -155,8 +208,11 @@ def main() -> int:
     assert any(k == "math" for k, _ in kinds), "单变量 $S$ 被漏掉了"
     assert sum(1 for k, _ in kinds if k == "math") == 1, "价格被误判成公式了"
 
+    print("\n文本段 LaTeX 残渣清理：")
+    tidy = check_text_leak()
+
     print(f"\n{ok}/{len(CASES)} 条公式渲染成功，图在 {OUT}")
-    ok = ok == len(CASES) and delims and arms
+    ok = ok == len(CASES) and delims and arms and tidy
     return 0 if ok else 1
 
 
